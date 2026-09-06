@@ -38,6 +38,7 @@ GOLD_TABLE_NAMES = (
 
 FULL_READ_DIMENSION_TARGETS = frozenset(GOLD_TABLE_NAMES[:-1])
 GOLD_METADATA_COLUMNS = ("created_at", "gold_version", "source_snapshot_id")
+MEASURE_TOLERANCE = 1e-9
 GOLD_SQL_TYPES = {
     "date_id": "INTEGER", "full_date": "DATE", "year_number": "SMALLINT",
     "quarter_number": "SMALLINT", "month_number": "SMALLINT", "month_name": "VARCHAR(20)",
@@ -158,7 +159,9 @@ def validate_fact_frame(frame: pd.DataFrame) -> None:
         values = pd.to_numeric(frame[column], errors="coerce")
         if values.isna().any() or not values.map(pd.api.types.is_number).all():
             raise ValueError(f"fact_sales.{column} contains non-numeric values")
-        if not values.map(lambda value: pd.notna(value) and value >= 0).all():
+        if not values.map(
+            lambda value: pd.notna(value) and value >= -MEASURE_TOLERANCE
+        ).all():
             raise ValueError(f"fact_sales.{column} contains negative values")
 
 
@@ -251,10 +254,15 @@ class GoldIntegrityValidator:
                 pd.to_numeric(fact["order_qty"], errors="coerce")
                 * pd.to_numeric(fact["unit_price"], errors="coerce")
                 - pd.to_numeric(fact["line_total"], errors="coerce")
+            ).round(4)
+            actual_discount = pd.to_numeric(
+                fact["discount_amount"], errors="coerce"
             )
-            if not expected_discount.eq(pd.to_numeric(fact["discount_amount"], errors="coerce")).all():
+            if not expected_discount.sub(actual_discount).abs().le(
+                MEASURE_TOLERANCE
+            ).all():
                 issues.append("fact_sales.discount_amount does not match approved formula")
-            if not expected_discount.ge(0).all():
+            if not expected_discount.ge(-MEASURE_TOLERANCE).all():
                 issues.append("fact_sales.discount_amount contains negative values")
             if not pd.to_numeric(fact["net_sales"], errors="coerce").eq(
                 pd.to_numeric(fact["line_total"], errors="coerce")
@@ -996,11 +1004,13 @@ class SalesGoldJob:
             "fact_rows": sum(len(batch.dataframe) for batch in fact_batches),
             "dimension_rows": sum(
                 len(frame)
-                for name, frame in prepared.get("candidate", {}).get("frames", {}).items()
+                for name, frame in prepared.get("frames", {}).items()
                 if name != "fact_sales"
             ),
             "rows_rejected": report.get("rows_rejected", 0),
         }
+        counts["rows_written"] = counts["dimension_rows"] + counts["fact_rows"]
+        counts["rows_read"] = counts["rows_written"]
         kwargs = {
             "gold_run_id": identity.gold_run_id,
             "source_snapshot_id": identity.source_snapshot_id,

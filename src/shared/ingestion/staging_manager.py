@@ -59,9 +59,10 @@ class StagingManager:
         safe_run_id = self._safe_identity(run_id)
         resolved_load_id = load_id or run_id
         safe_load_id = self._safe_identity(resolved_load_id)
-        name = (
-            f"{target_table}__{safe_run_id}__{safe_load_id}"
-        )
+        name = f"{target_table}__{safe_run_id}__{safe_load_id}"
+        if len(name) > 63:
+            identity_hash = hashlib.sha256(name.encode()).hexdigest()[:16]
+            name = f"{target_table[:40]}__{identity_hash}"
         existing = self._staging.get(name)
         if existing is not None:
             return existing

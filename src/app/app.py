@@ -7,6 +7,12 @@ from src.features.Person.jobs.person_bronze_job import PersonBronzeJob
 from src.features.Production.jobs.production_bronze_job import ProductionBronzeJob
 from src.app.bronze_to_silver_pipeline import BronzeToSilverPipeline
 from src.app.pipeline_runner import PipelineRunner
+from src.features.Sales_Performance.jobs.sales_silver_job import SalesSilverJob
+from src.shared.ingestion.postgres_publish_service import (
+    PostgresSilverPublishService,
+    PostgresSilverStagingWriter,
+)
+from scripts.warehouse.postgres.gold.sales_gold_load import _build_default_gold_job
 from src.shared.services.connection_health_service import ConnectionHealthService
 from src.shared.security.log_redaction import redact_log_message
 from src.core.settings import Settings, get_settings
@@ -94,18 +100,27 @@ class App:
         self.bootstrap_job = bootstrap_job or PlatformBootstrapJob()
         self.health_service = health_service or ConnectionHealthService(self.settings)
         self.bronze_job = bronze_job or SalesBronzeIngestionJob(self.settings)
+        silver_staging_writer = PostgresSilverStagingWriter(self.settings)
+        silver_job = SalesSilverJob(
+            settings=self.settings,
+            staging_writer=silver_staging_writer,
+            publish_service=PostgresSilverPublishService(self.settings),
+        )
         self.bronze_to_silver_pipeline = BronzeToSilverPipeline(
             bronze_jobs=(
                 self.bronze_job,
                 PersonBronzeJob(self.settings),
                 ProductionBronzeJob(self.settings),
             ),
+            silver_job=silver_job,
             settings=self.settings,
         )
+        self.gold_pipeline = _build_default_gold_job(self.settings)
         self.pipeline_runner = PipelineRunner(
             health_service=self.health_service,
             bootstrap_job=self.bootstrap_job,
             bronze_to_silver_pipeline=self.bronze_to_silver_pipeline,
+            gold_pipeline=self.gold_pipeline,
         )
         self._running = False
 
@@ -118,6 +133,7 @@ class App:
                 health_service=self.health_service,
                 bootstrap_job=self.bootstrap_job,
                 bronze_to_silver_pipeline=self.bronze_to_silver_pipeline,
+                gold_pipeline=getattr(self, "gold_pipeline", None),
             )
         result = runner.run(mode="full")
         return {

@@ -45,6 +45,11 @@ class PostgreSQLConnector(BaseConnector):
 
     def disconnect(self):
         if self.connection is not None:
+            if not getattr(self.connection, "closed", False):
+                try:
+                    self.connection.rollback()
+                except Exception:  # pragma: no cover - defensive cleanup
+                    logger.warning("PostgreSQL rollback during disconnect failed")
             self.connection.close()
             self.connection = None
             logger.info("Disconnected from PostgreSQL")

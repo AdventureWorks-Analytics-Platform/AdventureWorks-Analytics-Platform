@@ -54,8 +54,12 @@ def _engine(connection):
     return create_engine("postgresql://", creator=lambda: connection, poolclass=StaticPool)
 
 
-def _read(engine, table: str) -> pd.DataFrame:
-    return pd.read_sql_query(f'SELECT * FROM silver."{table}"', engine)
+def _read(engine, table: str, source_snapshot_id: str) -> pd.DataFrame:
+    return pd.read_sql_query(
+        f'SELECT * FROM silver."{table}" WHERE "source_snapshot_id" = %(snapshot_id)s',
+        engine,
+        params={"snapshot_id": source_snapshot_id},
+    )
 
 
 def build_dim_date(headers: pd.DataFrame) -> pd.DataFrame:
@@ -163,7 +167,7 @@ def build_fact_sales(details: pd.DataFrame, headers: pd.DataFrame) -> pd.DataFra
     result["unit_price_discount"] = pd.to_numeric(result["unit_price_discount"], errors="coerce").fillna(0)
     result["line_total"] = pd.to_numeric(result["line_total"], errors="coerce")
     gross_total = result["order_qty"] * result["unit_price"]
-    result["discount_amount"] = gross_total - result["line_total"]
+    result["discount_amount"] = (gross_total - result["line_total"]).round(4)
     result["net_sales"] = result["line_total"]
     return result[[
         "sales_order_id", "sales_order_detail_id", "order_date_id", "customer_id", "product_id",
@@ -178,52 +182,61 @@ class _PostgresGoldReader:
         self.batch_size = batch_size
 
     def __call__(self, table: str, *, source_snapshot_id: str) -> pd.DataFrame:
-        del source_snapshot_id
-        with PostgreSQLConnector(settings=self.settings) as pg:
-            return _read(_engine(pg.connection), table)
-
-    def fact_batches(self, *, source_snapshot_id: str, batch_size: int) -> Iterator[FactBatch]:
-        del source_snapshot_id
         with PostgreSQLConnector(settings=self.settings) as pg:
             engine = _engine(pg.connection)
-            bounds = pd.read_sql_query(
-                'SELECT MIN(sales_order_detail_id) AS lower_bound, '
-                'MAX(sales_order_detail_id) AS upper_bound '
-                'FROM silver."sales_order_detail_clean"',
-                engine,
-            ).iloc[0]
-            lower_bound = None
-            maximum = bounds["upper_bound"]
-            batch_number = 0
-            headers = _read(engine, "sales_order_header_clean")
-            while pd.notna(maximum) and (lower_bound is None or lower_bound < maximum):
-                upper_bound = (
-                    int(maximum)
-                    if lower_bound is None
-                    else min(int(maximum), int(lower_bound) + batch_size)
-                )
-                lower_sql = "" if lower_bound is None else (
-                    f' AND "sales_order_detail_id" > {int(lower_bound)}'
-                )
-                details = pd.read_sql_query(
-                    'SELECT * FROM silver."sales_order_detail_clean" '
-                    f'WHERE 1=1{lower_sql} '
-                    f'AND "sales_order_detail_id" <= {upper_bound} '
-                    'ORDER BY "sales_order_detail_id"',
+            try:
+                return _read(engine, table, source_snapshot_id)
+            finally:
+                engine.dispose()
+
+    def fact_batches(self, *, source_snapshot_id: str, batch_size: int) -> Iterator[FactBatch]:
+        with PostgreSQLConnector(settings=self.settings) as pg:
+            engine = _engine(pg.connection)
+            try:
+                bounds = pd.read_sql_query(
+                    'SELECT MIN(sales_order_detail_id) AS lower_bound, '
+                    'MAX(sales_order_detail_id) AS upper_bound '
+                    'FROM silver."sales_order_detail_clean" '
+                    'WHERE "source_snapshot_id" = %(snapshot_id)s',
                     engine,
-                )
-                if details.empty:
-                    break
-                batch_number += 1
-                yield build_fact_batch(
-                    details,
-                    headers,
-                    batch_number=batch_number,
-                    lower_bound=lower_bound,
-                    upper_bound=upper_bound,
-                    source_snapshot_id=source_snapshot_id,
-                )
-                lower_bound = upper_bound
+                    params={"snapshot_id": source_snapshot_id},
+                ).iloc[0]
+                lower_bound = None
+                maximum = bounds["upper_bound"]
+                batch_number = 0
+                headers = _read(engine, "sales_order_header_clean", source_snapshot_id)
+                while pd.notna(maximum) and (lower_bound is None or lower_bound < maximum):
+                    upper_bound = (
+                        int(maximum)
+                        if lower_bound is None
+                        else min(int(maximum), int(lower_bound) + batch_size)
+                    )
+                    lower_sql = "" if lower_bound is None else (
+                        f' AND "sales_order_detail_id" > {int(lower_bound)}'
+                    )
+                    details = pd.read_sql_query(
+                        'SELECT * FROM silver."sales_order_detail_clean" '
+                        'WHERE "source_snapshot_id" = %(snapshot_id)s '
+                        f'{lower_sql} '
+                        f'AND "sales_order_detail_id" <= {upper_bound} '
+                        'ORDER BY "sales_order_detail_id"',
+                        engine,
+                        params={"snapshot_id": source_snapshot_id},
+                    )
+                    if details.empty:
+                        break
+                    batch_number += 1
+                    yield build_fact_batch(
+                        details,
+                        headers,
+                        batch_number=batch_number,
+                        lower_bound=lower_bound,
+                        upper_bound=upper_bound,
+                        source_snapshot_id=source_snapshot_id,
+                    )
+                    lower_bound = upper_bound
+            finally:
+                engine.dispose()
 
 
 class _PostgresGoldPublisher:

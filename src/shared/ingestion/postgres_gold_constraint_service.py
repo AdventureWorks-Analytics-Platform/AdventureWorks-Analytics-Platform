@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping
 
+import pandas as pd
 from psycopg2 import sql
 
 from src.core.settings import Settings, get_settings
@@ -120,7 +121,16 @@ class PostgresGoldConstraintService:
         )
         rows = []
         for row in frame.itertuples(index=False, name=None):
-            rows.append(tuple(None if _is_missing(value) else value for value in row))
+            rows.append(
+                tuple(
+                    None
+                    if _is_missing(value)
+                    else value.item()
+                    if hasattr(value, "item")
+                    else value
+                    for value in row
+                )
+            )
         cursor.executemany(statement, rows)
 
     def _inspect_catalog(self, cursor, schema, specs) -> dict[str, Any]:
@@ -286,7 +296,9 @@ class PostgresGoldCandidateService:
 
 
 def _is_missing(value):
+    if value is None:
+        return True
     try:
-        return bool(value is None or value != value)
+        return bool(pd.isna(value))
     except (TypeError, ValueError):
         return False

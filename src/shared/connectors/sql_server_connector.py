@@ -72,7 +72,12 @@ class SQLServerConnector(BaseConnector):
 
     def disconnect(self):
         if self.connection is not None:
-            self.connection.close()
+            try:
+                self.connection.rollback()
+            except Exception:  # pragma: no cover - defensive cleanup
+                logger.warning("SQL Server rollback during disconnect failed")
+            finally:
+                self.connection.close()
             self.connection = None
             logger.info("Disconnected from SQL Server")
 

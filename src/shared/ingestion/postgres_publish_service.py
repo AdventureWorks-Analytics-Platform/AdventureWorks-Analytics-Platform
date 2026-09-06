@@ -1,6 +1,9 @@
 from uuid import uuid4
 
+import pandas as pd
 from psycopg2 import sql
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from src.core.settings import Settings, get_settings
 from src.shared.connectors.postgres_connector import PostgreSQLConnector
@@ -95,3 +98,35 @@ class PostgresSilverPublishService(PostgresPublishService):
 
     staging_schema = "silver_staging"
     published_schema = "silver"
+
+
+class PostgresSilverStagingWriter:
+    """Persist Silver staging frames before the atomic publish step."""
+
+    def __init__(self, settings: Settings | None = None):
+        self.settings = settings or get_settings()
+        self._initialized_tables: set[str] = set()
+        ensure_ingestion_schema(self.settings)
+
+    def __call__(self, frame: pd.DataFrame, staging_table: str) -> None:
+        PostgresPublishService._validate_identifier(staging_table)
+        if_exists = "append" if staging_table in self._initialized_tables else "replace"
+        with PostgreSQLConnector(settings=self.settings) as pg_conn:
+            engine = create_engine(
+                "postgresql://",
+                creator=lambda: pg_conn.connection,
+                poolclass=StaticPool,
+            )
+            try:
+                frame.to_sql(
+                    staging_table,
+                    engine,
+                    schema="silver_staging",
+                    if_exists=if_exists,
+                    index=False,
+                    method="multi",
+                    chunksize=1000,
+                )
+                self._initialized_tables.add(staging_table)
+            finally:
+                engine.dispose()

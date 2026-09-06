@@ -339,21 +339,32 @@ class SilverTransformationJob:
 
         with PostgreSQLConnector() as pg_conn:
             engine = _warehouse_engine(pg_conn.connection)
-            for batch_number, chunk in enumerate(pd.read_sql_query(query, engine, chunksize=batch_size), start=1):
-                batch_id = hashlib.sha256(
-                    json.dumps(
-                        {
-                            "source_table": source_table,
-                            "run_id": run_id,
-                            "load_id": load_id,
-                            "batch_number": batch_number,
-                            "ordering_key": ordering_key,
-                        },
-                        default=str,
-                        sort_keys=True,
-                    ).encode("utf-8")
-                ).hexdigest()
-                yield self._with_batch_lineage(chunk, source_table, run_id=run_id, load_id=load_id, batch_id=batch_id)
+            try:
+                for batch_number, chunk in enumerate(
+                    pd.read_sql_query(query, engine, chunksize=batch_size), start=1
+                ):
+                    batch_id = hashlib.sha256(
+                        json.dumps(
+                            {
+                                "source_table": source_table,
+                                "run_id": run_id,
+                                "load_id": load_id,
+                                "batch_number": batch_number,
+                                "ordering_key": ordering_key,
+                            },
+                            default=str,
+                            sort_keys=True,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    yield self._with_batch_lineage(
+                        chunk,
+                        source_table,
+                        run_id=run_id,
+                        load_id=load_id,
+                        batch_id=batch_id,
+                    )
+            finally:
+                engine.dispose()
 
     def _default_transformer(
         self,
@@ -444,7 +455,7 @@ class SilverTransformationJob:
         ]
         allowed_metadata = {
             "_source_system", "_source_table", "_load_date", "_record_hash",
-            "run_id", "load_id", "batch_id",
+            "run_id", "load_id", "batch_id", "source_snapshot_id",
         }
         unexpected_columns = [
             column for column in frame.columns
@@ -482,7 +493,7 @@ class SilverTransformationJob:
         ]
         allowed_metadata = {
             "_source_system", "_source_table", "_load_date", "_record_hash",
-            "run_id", "load_id", "batch_id",
+            "run_id", "load_id", "batch_id", "source_snapshot_id",
         }
         unexpected_columns = [
             column for column in frame.columns
@@ -867,10 +878,13 @@ class SilverTransformationJob:
                         spec.source_table, valid_chunk, person_frame
                     )
                     silver_chunks.append(silver_chunk)
+                    staged_silver_chunk = silver_chunk.copy()
+                    if not staged_silver_chunk.empty:
+                        staged_silver_chunk["source_snapshot_id"] = resolved_run_id
                     _, attempts = self._commit_staged_batch(
                         staging.name,
                         bronze_chunk,
-                        silver_chunk,
+                        staged_silver_chunk,
                         spec.source_table,
                         batch_number,
                     )
@@ -904,7 +918,8 @@ class SilverTransformationJob:
                 self.staging_manager.mark_failed(staging.name)
                 error = RuntimeError(
                     f"Silver table '{spec.source_table}' failed because required Bronze source "
-                    f"'{spec.source_name}' could not be read."
+                    f"'{spec.source_name}' could not be read or staged: "
+                    f"{type(exc).__name__}: {exc}"
                 )
                 results[spec.target_table] = {
                     "staging_name": staging.name,
@@ -961,6 +976,8 @@ class SilverTransformationJob:
             silver_frame, rows_deduplicated = self._global_deduplicate(
                 silver_frame, spec
             )
+            if not silver_frame.empty:
+                silver_frame["source_snapshot_id"] = resolved_run_id
             try:
                 self._validate_output_schema(silver_frame, spec)
             except SilverValidationError as exc:

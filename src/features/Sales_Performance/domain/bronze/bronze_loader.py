@@ -30,16 +30,19 @@ class BronzeLoader:
                 creator=lambda: pg_conn.connection,
                 poolclass=StaticPool,
             )
-            df.to_sql(
-                target_table,
-                engine,
-                schema=target_schema,
-                if_exists=if_exists,
-                index=False,
-                method="multi",
-                chunksize=1000,
-            )
-            return len(df), True
+            try:
+                df.to_sql(
+                    target_table,
+                    engine,
+                    schema=target_schema,
+                    if_exists=if_exists,
+                    index=False,
+                    method="multi",
+                    chunksize=1000,
+                )
+                return len(df), True
+            finally:
+                engine.dispose()
 
     def read_staging(self, staging_table: str, spec) -> pd.DataFrame:
         """Read the complete run-specific staging table for resume validation."""
@@ -49,10 +52,13 @@ class BronzeLoader:
                 creator=lambda: pg_conn.connection,
                 poolclass=StaticPool,
             )
-            return pd.read_sql_query(
-                f'SELECT * FROM "{self.staging_schema}"."{staging_table}"',
-                engine,
-            )
+            try:
+                return pd.read_sql_query(
+                    f'SELECT * FROM "{self.staging_schema}"."{staging_table}"',
+                    engine,
+                )
+            finally:
+                engine.dispose()
 
     def load_batch_transactionally(
         self,
@@ -78,22 +84,25 @@ class BronzeLoader:
                 creator=lambda: pg_conn.connection,
                 poolclass=StaticPool,
             )
-            with engine.begin() as transaction:
-                df.to_sql(
-                    target_table,
-                    transaction,
-                    schema=target_schema,
-                    if_exists=if_exists,
-                    index=False,
-                    method="multi",
-                    chunksize=1000,
-                )
-                if content_hash is None:
-                    checkpoint_manager.advance_in_transaction(
-                        transaction, batch_id, upper_bound
+            try:
+                with engine.begin() as transaction:
+                    df.to_sql(
+                        target_table,
+                        transaction,
+                        schema=target_schema,
+                        if_exists=if_exists,
+                        index=False,
+                        method="multi",
+                        chunksize=1000,
                     )
-                else:
-                    checkpoint_manager.advance_in_transaction(
-                        transaction, batch_id, upper_bound, content_hash
-                    )
-            return len(df), True
+                    if content_hash is None:
+                        checkpoint_manager.advance_in_transaction(
+                            transaction, batch_id, upper_bound
+                        )
+                    else:
+                        checkpoint_manager.advance_in_transaction(
+                            transaction, batch_id, upper_bound, content_hash
+                        )
+                return len(df), True
+            finally:
+                engine.dispose()
