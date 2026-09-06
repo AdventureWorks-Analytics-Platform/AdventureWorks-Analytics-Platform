@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
-from datetime import date
-from typing import Dict
+from collections.abc import Iterator, Mapping
+from typing import Any
 
 import pandas as pd
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
 from src.shared.connectors.postgres_connector import PostgreSQLConnector
+from src.shared.ingestion.postgres_gold_constraint_service import (
+    PostgresGoldCandidateService,
+)
+from src.shared.ingestion.postgres_gold_publish_service import (
+    PostgresGoldPublishService,
+)
+from src.features.Sales_Performance.jobs.sales_gold_job import (
+    GOLD_TABLE_SPECS,
+    FactBatch,
+    GoldConstraintManager,
+    SalesGoldJob,
+    build_fact_batch,
+)
 
 
 class DimensionBuildError(ValueError):
@@ -36,8 +49,6 @@ def _select_dimension_rows(
         .drop_duplicates(key, keep="first")
         .reset_index(drop=True)
     )
-
-
 
 def _engine(connection):
     return create_engine("postgresql://", creator=lambda: connection, poolclass=StaticPool)
@@ -161,60 +172,110 @@ def build_fact_sales(details: pd.DataFrame, headers: pd.DataFrame) -> pd.DataFra
     ]]
 
 
-def _add_constraints(pg: PostgreSQLConnector) -> None:
-    statements = [
-        "ALTER TABLE gold.dim_customer ADD PRIMARY KEY (customer_id)",
-        "ALTER TABLE gold.dim_product ADD PRIMARY KEY (product_id)",
-        "ALTER TABLE gold.dim_date ADD PRIMARY KEY (date_id)",
-        "ALTER TABLE gold.dim_territory ADD PRIMARY KEY (territory_id)",
-        "ALTER TABLE gold.dim_salesperson ADD PRIMARY KEY (salesperson_id)",
-        "ALTER TABLE gold.fact_sales ADD PRIMARY KEY (sales_order_detail_id)",
-        "ALTER TABLE gold.fact_sales ADD FOREIGN KEY (order_date_id) REFERENCES gold.dim_date(date_id)",
-        "ALTER TABLE gold.fact_sales ADD FOREIGN KEY (customer_id) REFERENCES gold.dim_customer(customer_id)",
-        "ALTER TABLE gold.fact_sales ADD FOREIGN KEY (product_id) REFERENCES gold.dim_product(product_id)",
-        "ALTER TABLE gold.fact_sales ADD FOREIGN KEY (territory_id) REFERENCES gold.dim_territory(territory_id)",
-        "ALTER TABLE gold.fact_sales ADD FOREIGN KEY (salesperson_id) REFERENCES gold.dim_salesperson(salesperson_id)",
-    ]
-    for statement in statements:
-        pg.execute_query(statement)
+class _PostgresGoldReader:
+    def __init__(self, settings, batch_size):
+        self.settings = settings
+        self.batch_size = batch_size
+
+    def __call__(self, table: str, *, source_snapshot_id: str) -> pd.DataFrame:
+        del source_snapshot_id
+        with PostgreSQLConnector(settings=self.settings) as pg:
+            return _read(_engine(pg.connection), table)
+
+    def fact_batches(self, *, source_snapshot_id: str, batch_size: int) -> Iterator[FactBatch]:
+        del source_snapshot_id
+        with PostgreSQLConnector(settings=self.settings) as pg:
+            engine = _engine(pg.connection)
+            bounds = pd.read_sql_query(
+                'SELECT MIN(sales_order_detail_id) AS lower_bound, '
+                'MAX(sales_order_detail_id) AS upper_bound '
+                'FROM silver."sales_order_detail_clean"',
+                engine,
+            ).iloc[0]
+            lower_bound = None
+            maximum = bounds["upper_bound"]
+            batch_number = 0
+            headers = _read(engine, "sales_order_header_clean")
+            while pd.notna(maximum) and (lower_bound is None or lower_bound < maximum):
+                upper_bound = (
+                    int(maximum)
+                    if lower_bound is None
+                    else min(int(maximum), int(lower_bound) + batch_size)
+                )
+                lower_sql = "" if lower_bound is None else (
+                    f' AND "sales_order_detail_id" > {int(lower_bound)}'
+                )
+                details = pd.read_sql_query(
+                    'SELECT * FROM silver."sales_order_detail_clean" '
+                    f'WHERE 1=1{lower_sql} '
+                    f'AND "sales_order_detail_id" <= {upper_bound} '
+                    'ORDER BY "sales_order_detail_id"',
+                    engine,
+                )
+                if details.empty:
+                    break
+                batch_number += 1
+                yield build_fact_batch(
+                    details,
+                    headers,
+                    batch_number=batch_number,
+                    lower_bound=lower_bound,
+                    upper_bound=upper_bound,
+                    source_snapshot_id=source_snapshot_id,
+                )
+                lower_bound = upper_bound
 
 
-def _reset_gold_tables(pg: PostgreSQLConnector) -> None:
-    for table in [
-        "fact_sales",
-        "dim_date",
-        "dim_customer",
-        "dim_product",
-        "dim_territory",
-        "dim_salesperson",
-    ]:
-        pg.execute_query(f"DROP TABLE IF EXISTS gold.{table} CASCADE")
+class _PostgresGoldPublisher:
+    def __init__(self, settings):
+        self.candidate_service = PostgresGoldCandidateService(settings=settings)
+        self.publish_service = PostgresGoldPublishService(settings=settings)
+
+    def prepare(self, frames, identity, specs):
+        return self.candidate_service.prepare_candidate(frames, identity, specs)
+
+    def publish(self, prepared, **kwargs):
+        return self.publish_service.publish(prepared, **kwargs)
 
 
-def run() -> Dict[str, int]:
-    with PostgreSQLConnector() as pg:
-        _reset_gold_tables(pg)
-        engine = _engine(pg.connection)
-        headers = _read(engine, "sales_order_header_clean")
-        details = _read(engine, "sales_order_detail_clean")
-        customers = _read(engine, "customer_clean")
-        territories = _read(engine, "sales_territory_clean")
-        salespeople = _read(engine, "sales_person_clean")
-        products = _read(engine, "product_clean")
+def _build_default_gold_job(settings=None) -> SalesGoldJob:
+    from src.core.settings import get_settings
 
-        frames = {
-            "dim_date": build_dim_date(headers),
-            "dim_customer": build_dim_customer(customers),
-            "dim_product": build_dim_product(products),
-            "dim_territory": build_dim_territory(territories),
-            "dim_salesperson": build_dim_salesperson(salespeople),
-            "fact_sales": build_fact_sales(details, headers),
-        }
-        for table, frame in frames.items():
-            frame.to_sql(table, engine, schema="gold", if_exists="replace", index=False, method="multi", chunksize=1000)
-        _add_constraints(pg)
-        return {table: len(frame) for table, frame in frames.items()}
+    resolved = settings or get_settings()
+    reader = _PostgresGoldReader(resolved, resolved.batch_size)
+    builders = {
+        "dim_date": build_dim_date,
+        "dim_customer": build_dim_customer,
+        "dim_product": build_dim_product,
+        "dim_territory": build_dim_territory,
+        "dim_salesperson": build_dim_salesperson,
+    }
+    return SalesGoldJob(
+        settings=resolved,
+        reader=reader,
+        builders=builders,
+        constraint_manager=GoldConstraintManager(),
+        publisher=_PostgresGoldPublisher(resolved),
+        fact_batch_reader=reader.fact_batches,
+    )
 
 
-if __name__ == "__main__":
-    print(run())
+def run(
+    *,
+    pipeline_snapshot_id: str | None = None,
+    silver_result: Mapping[str, Any] | None = None,
+    job: SalesGoldJob | None = None,
+) -> dict[str, Any]:
+    """Delegate Gold execution to the injectable production job.
+
+    This compatibility entrypoint intentionally owns no reset, retry, DDL,
+    pandas write, or publication mechanics.
+    """
+    if not pipeline_snapshot_id or silver_result is None:
+        raise ValueError(
+            "legacy Gold run requires the gated pipeline_snapshot_id and silver_result"
+        )
+    return (job or _build_default_gold_job()).run(
+        pipeline_snapshot_id=pipeline_snapshot_id,
+        silver_result=silver_result,
+    )

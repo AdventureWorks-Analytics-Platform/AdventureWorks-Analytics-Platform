@@ -88,11 +88,9 @@ class App:
         bootstrap_job=None,
         health_service=None,
         bronze_job=None,
-        gold_pipeline=None,
         settings: Settings | None = None,
     ):
         self.settings = settings or get_settings()
-        self.gold_pipeline = gold_pipeline
         self.bootstrap_job = bootstrap_job or PlatformBootstrapJob()
         self.health_service = health_service or ConnectionHealthService(self.settings)
         self.bronze_job = bronze_job or SalesBronzeIngestionJob(self.settings)
@@ -108,7 +106,6 @@ class App:
             health_service=self.health_service,
             bootstrap_job=self.bootstrap_job,
             bronze_to_silver_pipeline=self.bronze_to_silver_pipeline,
-            gold_pipeline=gold_pipeline,
         )
         self._running = False
 
@@ -121,7 +118,6 @@ class App:
                 health_service=self.health_service,
                 bootstrap_job=self.bootstrap_job,
                 bronze_to_silver_pipeline=self.bronze_to_silver_pipeline,
-                gold_pipeline=getattr(self, "gold_pipeline", None),
             )
         result = runner.run(mode="full")
         return {

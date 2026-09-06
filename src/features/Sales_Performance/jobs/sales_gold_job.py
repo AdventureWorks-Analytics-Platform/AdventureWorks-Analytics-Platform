@@ -610,7 +610,14 @@ class GoldPublishService:
             try:
                 return operation()
             except UnknownCommitError:
-                decision = reconciliation.resolve(staging_name, batch_id, content_hash)
+                try:
+                    decision = reconciliation.resolve(staging_name, batch_id, content_hash)
+                except TypeError:
+                    decision = reconciliation.resolve(
+                        batch_id=batch_id,
+                        content_hash=content_hash,
+                        candidate_schema=staging_name,
+                    )
                 if decision == "SKIP":
                     return {"reconciled": True, "batch_id": batch_id}
                 if decision == "RETRY":
@@ -913,7 +920,9 @@ class SalesGoldJob:
             constraints = self.constraint_manager.verify(prepared, GOLD_TABLE_SPECS)
             if not constraints.get("constraints_verified", False):
                 raise ValueError(constraints.get("error_message", "Gold constraints failed"))
-            publication = self.publisher.publish(prepared, identity)
+            publication = self._publish_candidate(
+                prepared, identity, report, constraints, fact_batches
+            )
             for spec in GOLD_TABLE_SPECS:
                 table_results[spec.target_table] = self._table_result(
                     spec, identity, started_at, len(frames[spec.target_table]),
@@ -981,6 +990,31 @@ class SalesGoldJob:
             validate_dimension_frame(built, spec)
             frames[spec.target_table] = built
         return frames, tuple(fact_batches)
+
+    def _publish_candidate(self, prepared, identity, report, constraints, fact_batches):
+        counts = {
+            "fact_rows": sum(len(batch.dataframe) for batch in fact_batches),
+            "dimension_rows": sum(
+                len(frame)
+                for name, frame in prepared.get("candidate", {}).get("frames", {}).items()
+                if name != "fact_sales"
+            ),
+            "rows_rejected": report.get("rows_rejected", 0),
+        }
+        kwargs = {
+            "gold_run_id": identity.gold_run_id,
+            "source_snapshot_id": identity.source_snapshot_id,
+            "validation_report": report,
+            "constraint_report": constraints,
+            "kpi_report": report.get("kpi_report", {}),
+            "counts": counts,
+        }
+        try:
+            return self.publisher.publish(prepared, **kwargs)
+        except TypeError as exc:
+            if "unexpected keyword" not in str(exc):
+                raise
+            return self.publisher.publish(prepared, identity)
 
     @staticmethod
     def _table_result(spec, identity, started_at, rows_written, *, status, candidate, report, constraints, publication):
