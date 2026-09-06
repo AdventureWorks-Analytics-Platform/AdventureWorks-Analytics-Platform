@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import inspect
 from time import perf_counter
 from typing import Any
 from uuid import uuid4
@@ -32,11 +33,14 @@ class PipelineRunner:
         started_clock = self.clock()
         run_id = str(uuid4())
         requested_stages = ["bronze", "silver"]
+        if self.gold_pipeline is not None:
+            requested_stages.append("gold")
         health = self.health_service.check_all()
         if health.get("status") != "ok":
             return self._result(
                 run_id, mode, requested_stages, started_at, started_clock,
                 health=health, bootstrap=None, pipeline=None,
+                gold=None,
                 failed_stage="health",
             )
 
@@ -45,6 +49,7 @@ class PipelineRunner:
             return self._result(
                 run_id, mode, requested_stages, started_at, started_clock,
                 health=health, bootstrap=bootstrap, pipeline=None,
+                gold=None,
                 failed_stage="bootstrap",
             )
 
@@ -53,14 +58,41 @@ class PipelineRunner:
             return self._result(
                 run_id, mode, requested_stages, started_at, started_clock,
                 health=health, bootstrap=bootstrap, pipeline=pipeline,
+                gold=None,
                 failed_stage="silver",
             )
+
+        gold = None
+        if self.gold_pipeline is not None:
+            gold = self._run_gold(self.gold_pipeline, run_id, pipeline)
+            if gold.get("status") != "SUCCESS":
+                return self._result(
+                    run_id, mode, requested_stages, started_at, started_clock,
+                    health=health, bootstrap=bootstrap, pipeline=pipeline,
+                    gold=gold,
+                    failed_stage="gold",
+                )
 
         return self._result(
             run_id, mode, requested_stages, started_at, started_clock,
             health=health, bootstrap=bootstrap, pipeline=pipeline,
+            gold=gold,
             failed_stage=None,
         )
+
+    @staticmethod
+    def _run_gold(gold_pipeline, pipeline_snapshot_id, pipeline):
+        run = gold_pipeline.run
+        parameters = inspect.signature(run).parameters
+        kwargs = {}
+        if "pipeline_snapshot_id" in parameters:
+            kwargs["pipeline_snapshot_id"] = pipeline_snapshot_id
+        if "silver_result" in parameters:
+            kwargs["silver_result"] = {
+                "snapshot_id": pipeline.get("snapshot_id"),
+                "silver": pipeline.get("silver", {}),
+            }
+        return run(**kwargs) if kwargs else run()
 
     def _result(
         self,
@@ -73,6 +105,7 @@ class PipelineRunner:
         health,
         bootstrap,
         pipeline,
+        gold,
         failed_stage,
     ) -> dict[str, object]:
         finished_at = datetime.now(timezone.utc)
@@ -94,6 +127,6 @@ class PipelineRunner:
             "bronze_gate": pipeline.get("bronze_gate"),
             "snapshot_id": pipeline.get("snapshot_id"),
             "silver": pipeline.get("silver"),
-            "gold": {"status": "NOT_REQUESTED"},
+            "gold": gold if gold is not None else {"status": "NOT_REQUESTED"},
             "report_paths": [],
         }

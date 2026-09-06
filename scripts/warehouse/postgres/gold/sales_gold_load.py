@@ -12,6 +12,32 @@ from sqlalchemy.pool import StaticPool
 from src.shared.connectors.postgres_connector import PostgreSQLConnector
 
 
+class DimensionBuildError(ValueError):
+    """Raised when a Gold dimension cannot satisfy its input contract."""
+
+
+class FactBuildError(ValueError):
+    """Raised when fact input cannot preserve the approved line-item grain."""
+
+
+def _select_dimension_rows(
+    frame: pd.DataFrame,
+    columns: list[str],
+    key: str,
+) -> pd.DataFrame:
+    missing = sorted(set(columns) - set(frame.columns))
+    if missing:
+        raise DimensionBuildError(f"Missing dimension columns: {missing}")
+    if frame[key].isna().any():
+        raise DimensionBuildError(f"Dimension key contains NULL values: {key}")
+    return (
+        frame[columns]
+        .sort_values(columns, kind="mergesort", na_position="last")
+        .drop_duplicates(key, keep="first")
+        .reset_index(drop=True)
+    )
+
+
 
 def _engine(connection):
     return create_engine("postgresql://", creator=lambda: connection, poolclass=StaticPool)
@@ -22,7 +48,11 @@ def _read(engine, table: str) -> pd.DataFrame:
 
 
 def build_dim_date(headers: pd.DataFrame) -> pd.DataFrame:
+    if "order_date" not in headers.columns:
+        raise DimensionBuildError("Missing dimension columns: ['order_date']")
     dates = pd.to_datetime(headers["order_date"], errors="coerce").dropna().dt.date
+    if dates.empty:
+        raise DimensionBuildError("Date dimension requires at least one valid order_date")
     start_date = min(dates)
     end_date = max(dates)
     values = pd.date_range(start=start_date, end=end_date, freq="D")
@@ -41,34 +71,75 @@ def build_dim_date(headers: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_dim_customer(customers: pd.DataFrame) -> pd.DataFrame:
-    return customers[["customer_id", "customer_name", "person_id", "store_id", "territory_id", "account_number"]].drop_duplicates("customer_id")
+    return _select_dimension_rows(
+        customers,
+        ["customer_id", "customer_name", "person_id", "store_id", "territory_id", "account_number"],
+        "customer_id",
+    )
 
 
 def build_dim_product(products: pd.DataFrame) -> pd.DataFrame:
-    return products[[
-        "product_id", "product_name", "product_number", "product_line", "class", "style",
-        "list_price", "standard_cost", "is_discontinued",
-    ]].drop_duplicates("product_id")
+    selected = _select_dimension_rows(
+        products,
+        [
+            "product_id", "product_name", "product_number", "product_line", "class", "style",
+            "list_price", "standard_cost", "is_discontinued",
+        ],
+        "product_id",
+    )
+    return selected.rename(columns={"class": "product_class", "style": "product_style"})
 
 
 def build_dim_territory(territories: pd.DataFrame) -> pd.DataFrame:
-    return territories[["territory_id", "territory_name", "country_region_code", "territory_group"]].drop_duplicates("territory_id")
+    return _select_dimension_rows(
+        territories,
+        ["territory_id", "territory_name", "country_region_code", "territory_group"],
+        "territory_id",
+    )
 
 
 def build_dim_salesperson(salespeople: pd.DataFrame) -> pd.DataFrame:
-    return salespeople[[
-        "salesperson_id", "business_entity_id", "territory_id", "sales_quota", "bonus",
-        "commission_pct", "salesperson_name",
-    ]].drop_duplicates("salesperson_id")
+    return _select_dimension_rows(
+        salespeople,
+        [
+            "salesperson_id", "business_entity_id", "territory_id", "sales_quota", "bonus",
+            "commission_pct", "salesperson_name",
+        ],
+        "salesperson_id",
+    )
 
 
 def build_fact_sales(details: pd.DataFrame, headers: pd.DataFrame) -> pd.DataFrame:
+    required_detail_columns = {
+        "sales_order_id", "sales_order_detail_id", "product_id", "order_qty",
+        "unit_price", "unit_price_discount", "line_total",
+    }
+    missing_details = sorted(required_detail_columns - set(details.columns))
+    if missing_details:
+        raise FactBuildError(f"Missing fact detail columns: {missing_details}")
+    required_header_columns = {
+        "sales_order_id", "order_date", "customer_id", "territory_id", "salesperson_id",
+    }
+    missing_headers = sorted(required_header_columns - set(headers.columns))
+    if missing_headers:
+        raise FactBuildError(f"Missing fact header columns: {missing_headers}")
+    if details["sales_order_detail_id"].isna().any():
+        raise FactBuildError("Fact key contains NULL values: sales_order_detail_id")
+    if not details["sales_order_detail_id"].is_unique:
+        raise FactBuildError("Fact key is not unique: sales_order_detail_id")
+    if headers["sales_order_id"].isna().any() or not headers["sales_order_id"].is_unique:
+        raise FactBuildError("Header key must be non-null and unique: sales_order_id")
     result = details.merge(
         headers[["sales_order_id", "order_date", "customer_id", "territory_id", "salesperson_id"]],
-        on="sales_order_id",
-        how="inner",
+        on="sales_order_id", how="left", indicator=True,
         validate="many_to_one",
     )
+    if (result["_merge"] != "both").any():
+        missing_orders = result.loc[result["_merge"] != "both", "sales_order_id"].tolist()
+        raise FactBuildError(
+            f"Missing required headers for sales_order_id values: {missing_orders}"
+        )
+    result = result.drop(columns=["_merge"])
     result["order_date"] = pd.to_datetime(result["order_date"], errors="coerce")
     result["order_date_id"] = (
         result["order_date"].dt.year * 10000

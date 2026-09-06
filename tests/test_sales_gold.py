@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 from scripts.warehouse.postgres.gold.sales_gold_load import (
+    DimensionBuildError,
     build_dim_customer,
     build_dim_date,
     build_dim_product,
@@ -61,6 +62,13 @@ class TestBuildDimDate:
         assert result[result["date_id"] == 20110529]["is_weekend"].values[0] == True  # Sunday
         assert result[result["date_id"] == 20110530]["is_weekend"].values[0] == False  # Monday
 
+    def test_build_dim_date_rejects_empty_or_invalid_input(self):
+        with pytest.raises(DimensionBuildError, match="at least one valid order_date"):
+            build_dim_date(pd.DataFrame({"order_date": ["not-a-date"]}))
+
+        with pytest.raises(DimensionBuildError, match="order_date"):
+            build_dim_date(pd.DataFrame())
+
 
 class TestBuildDimensions:
     """Test dimension table building logic."""
@@ -99,6 +107,24 @@ class TestBuildDimensions:
 
         assert len(result) == 2
         assert result["product_id"].is_unique
+        assert "product_class" in result.columns
+        assert "product_style" in result.columns
+        assert "class" not in result.columns
+        assert "style" not in result.columns
+
+    def test_dimension_duplicate_selection_is_deterministic(self):
+        customers = pd.DataFrame({
+            "customer_id": [1, 1],
+            "customer_name": ["Zeta", "Alpha"],
+            "person_id": [2, 1],
+            "store_id": [2, 1],
+            "territory_id": [2, 1],
+            "account_number": ["ZZ", "AA"],
+        })
+
+        result = build_dim_customer(customers.sample(frac=1, random_state=7))
+
+        assert result.iloc[0]["customer_name"] == "Alpha"
 
     def test_build_dim_territory_deduplicates_by_territory_id(self):
         """Territory dimension should have unique territory_id."""
@@ -113,6 +139,21 @@ class TestBuildDimensions:
 
         assert len(result) == 2
         assert result["territory_id"].is_unique
+
+    def test_dimension_builders_reject_missing_columns_and_null_keys(self):
+        with pytest.raises(DimensionBuildError, match="Missing dimension columns"):
+            build_dim_customer(pd.DataFrame({"customer_id": [1]}))
+
+        customers = pd.DataFrame({
+            "customer_id": [None],
+            "customer_name": ["ABC Corp"],
+            "person_id": [None],
+            "store_id": [None],
+            "territory_id": [1],
+            "account_number": ["AA123"],
+        })
+        with pytest.raises(DimensionBuildError, match="NULL values"):
+            build_dim_customer(customers)
 
     def test_build_dim_salesperson_deduplicates_by_salesperson_id(self):
         """Salesperson dimension should have unique salesperson_id."""
