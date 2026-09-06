@@ -331,8 +331,8 @@ Do not keep the destructive Gold flow in the canonical path. Do not add retry be
 - [x] The job runs only after `SilverSnapshotGate`; all six Silver targets are published and share one `source_snapshot_id`.
 - [x] Gold results distinguish `pipeline_snapshot_id`, `source_snapshot_id`, `gold_run_id`, and `gold_load_id`.
 - [x] Every attempted table returns the shared result contract with counts, timing, identity, error, staging, and publication fields.
-- [ ] Existing `build_dim_*`, `build_fact_sales`, and legacy `run()` callers remain functional through delegation.
-- [ ] The compatibility wrapper contains no new destructive, retry, or publication logic.
+- [x] Existing `build_dim_*`, `build_fact_sales`, and legacy `run()` callers remain functional through delegation.
+- [x] The compatibility wrapper contains no new destructive, retry, or publication logic.
 
 ### 7.2 Dimensions and fact construction
 
@@ -351,28 +351,28 @@ Do not keep the destructive Gold flow in the canonical path. Do not add retry be
 - [x] Duplicate PKs, required NULLs, orphan references, invalid measures, and grain violations block publication.
 - [x] Non-null salesperson references must resolve; NULL salesperson is accepted only under the documented online-order rule.
 - [x] KPI validation runs against the candidate schema before the current pointer changes, uses the same `source_snapshot_id`, and enforces relative 2% tolerance; a zero baseline passes only with a zero candidate.
-- [ ] PK/FK constraints are created and verified on staging before the candidate is eligible for publish.
-- [ ] Constraint creation failure leaves published Gold unchanged.
+- [x] PK/FK constraints are created and verified on staging before the candidate is eligible for publish.
+- [x] Constraint creation failure leaves published Gold unchanged.
 
 ### 7.4 Atomic publish, retry, and rerun
 
-- [ ] The canonical path never drops or replaces published Gold before candidate build and validation succeed.
-- [ ] Gold is published through a versioned schema and current pointer; consumers use stable views or pointer objects under the `gold` namespace.
-- [ ] A failed build, validation, constraint operation, or publish leaves the previous Gold version unchanged.
-- [ ] Successful publication atomically promotes the complete validated version and updates the current pointer in one transaction.
-- [ ] Only classified transient database errors are retried.
-- [ ] Retry preserves run/table/batch identity and uses the same atomic unit.
-- [ ] Unknown commit outcomes are reconciled before another write attempt.
-- [ ] Failed or abandoned staging is marked/cleaned according to the shared lifecycle policy.
-- [ ] Rerunning the same Silver snapshot creates a new `gold_run_id`, remains deterministic, does not create duplicate fact rows, and may create a new Gold version.
-- [ ] Only one Gold run is active; concurrent runs wait or are rejected according to the lock policy.
+- [x] The canonical path never drops or replaces published Gold before candidate build and validation succeed.
+- [x] Gold is published through a versioned schema and current pointer; consumers use stable views or pointer objects under the `gold` namespace.
+- [x] A failed build, validation, constraint operation, or publish leaves the previous Gold version unchanged.
+- [x] Successful publication atomically promotes the complete validated version and updates the current pointer in one transaction.
+- [x] Only classified transient database errors are retried.
+- [x] Retry preserves run/table/batch identity and uses the same atomic unit.
+- [x] Unknown commit outcomes are reconciled before another write attempt.
+- [x] Failed or abandoned staging is marked/cleaned according to the shared lifecycle policy.
+- [x] Rerunning the same Silver snapshot creates a new `gold_run_id`, remains deterministic, does not create duplicate fact rows, and may create a new Gold version.
+- [x] Only one Gold run is active; concurrent runs wait or are rejected according to the lock policy.
 
 ### 7.5 Observability and pipeline gate
 
-- [ ] Audit records include snapshot, run/table/batch identity, source/target, counts, attempts, validation, constraint, publish, and error outcomes.
-- [ ] Structured logs include applicable stage/table/batch/status fields without secrets or full raw payloads.
-- [ ] Gold failure or KPI validation failure prevents downstream success, returns `failed_stage="gold"`, and does not roll back Bronze or Silver.
-- [ ] A machine-readable summary distinguishes dimension counts, fact counts, orphan/duplicate counts, KPI status, and publication state.
+- [x] Audit records include snapshot, run/table/batch identity, source/target, counts, attempts, validation, constraint, publish, and error outcomes.
+- [x] Structured logs include applicable stage/table/batch/status fields without secrets or full raw payloads.
+- [x] Gold failure or KPI validation failure prevents downstream success, returns `failed_stage="gold"`, and does not roll back Bronze or Silver.
+- [x] A machine-readable summary distinguishes dimension counts, fact counts, orphan/duplicate counts, KPI status, and publication state.
 
 ## 8. Test matrix and commands
 
@@ -425,20 +425,20 @@ Integration tests must be marked with the repository integration marker and must
 
 Phase 4D is complete only when all applicable items below have implementation and test evidence:
 
-- [ ] Gold is callable through an injectable job/service and the legacy entrypoint delegates to it.
-- [ ] Small dimensions use documented full-read behavior with explicit schema/key validation.
-- [ ] `fact_sales` uses stable-key batches and preserves `sales_order_detail_id` grain.
-- [ ] Fact duplicate, orphan, null, type, measure, and KPI violations fail closed.
-- [ ] Gold candidate tables are built in run-specific staging; published Gold is untouched during the build.
-- [ ] PK/FK constraints and data types are verified on staging before publication.
-- [ ] Gold publication is atomic and preserves the previous version after any failure.
-- [ ] Retry is limited to transient errors, preserves identity, and reconciles unknown commits.
-- [ ] Same-snapshot rerun is deterministic and idempotent.
-- [ ] Failed/abandoned staging cleanup is tested.
-- [ ] Focused Gold unit tests pass without external services.
-- [ ] Integration tests pass when prerequisites are available, or blockers are clearly recorded.
-- [ ] Structured audit/log/report output is complete and redacted.
-- [ ] README/runbook and the Phase 4 master checklist match the implemented runtime.
+- [x] Gold is callable through an injectable job/service and the legacy entrypoint delegates to it.
+- [x] Small dimensions use documented full-read behavior with explicit schema/key validation.
+- [x] `fact_sales` uses stable-key batches and preserves `sales_order_detail_id` grain.
+- [x] Fact duplicate, orphan, null, type, measure, and KPI violations fail closed.
+- [x] Gold candidate tables are built in run-specific staging; published Gold is untouched during the build.
+- [x] PK/FK constraints and data types are verified on staging before publication.
+- [x] Gold publication is atomic and preserves the previous version after any failure.
+- [x] Retry is limited to transient errors, preserves identity, and reconciles unknown commits.
+- [x] Same-snapshot rerun is deterministic and idempotent.
+- [x] Failed/abandoned staging cleanup is tested.
+- [x] Focused Gold unit tests pass without external services.
+- [x] Integration tests pass when prerequisites are available, or blockers are clearly recorded.
+- [x] Structured audit/log/report output is complete and redacted.
+- [x] README/runbook and the Phase 4 master checklist match the implemented runtime.
 
 Production DoD must not be inferred from the existing pandas builder tests alone. Staging transaction, constraint, integrity, KPI gate, retry/reconciliation, rerun, and publish-preservation evidence are required.
 
