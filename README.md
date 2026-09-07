@@ -133,12 +133,6 @@ The Gold implementation and stage are now connected to the application entry poi
 | Gold | Analytical model | Five dimensions, `fact_sales`, KPIs, and versioned publication |
 | Dashboard | Consumption/reporting | Sales performance reporting from analytical output |
 
-## Dashboard
-
-The dashboard is the final data consumption layer. It presents Sales Performance metrics to business users based on analytical tables validated in Silver/Gold.
-
-![Sales Performance Dashboard](Dashboard/SalesPerformanceDashboard.png)
-
 ## Workflow overview
 
 ```mermaid
@@ -183,6 +177,11 @@ flowchart TD
     AA -->|fail| AC[Keep previous Gold]
     AB --> R[PipelineRunner result]
 ```
+## Dashboard
+
+The dashboard is the final data consumption layer. It presents Sales Performance metrics to business users based on analytical tables validated in Silver/Gold.
+
+![Sales Performance Dashboard](Dashboard/SalesPerformanceDashboard.png)
 
 
 ## Repository Structure
