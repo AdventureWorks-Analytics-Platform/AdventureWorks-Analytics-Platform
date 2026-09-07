@@ -39,6 +39,7 @@ class BronzeToSilverPipeline:
     def run(
         self,
         mode: str = "full",
+        stage: str = "full",
         load_date: datetime | None = None,
         resume_load_ids: dict[str, str] | None = None,
         recovery_snapshot: dict[str, object] | None = None,
@@ -68,11 +69,21 @@ class BronzeToSilverPipeline:
                 "silver": None,
             }
 
+        if stage == "bronze":
+            return {
+                "status": self._bronze_status(bronze_result),
+                "snapshot_id": snapshot_id,
+                "recovery": recovery,
+                "bronze": bronze_result,
+                "bronze_gate": gate_result,
+                "silver": None,
+            }
+
         silver_result = self._run_silver(snapshot_id)
         silver_identity = self._validate_silver_identity(silver_result, snapshot_id)
         silver_ok = self._silver_succeeded(silver_result) and silver_identity["status"] == "SUCCESS"
         return {
-            "status": "SUCCESS" if silver_ok else "FAILED",
+            "status": self._silver_status(silver_result) if silver_ok else "FAILED",
             "snapshot_id": snapshot_id,
             "recovery": recovery,
             "bronze": bronze_result,
@@ -80,6 +91,30 @@ class BronzeToSilverPipeline:
             "silver_identity": silver_identity,
             "silver": silver_result,
         }
+
+    @staticmethod
+    def _bronze_status(bronze_result):
+        statuses = [
+            result.get("status")
+            for result in bronze_result.values()
+            if isinstance(result, dict)
+        ]
+        if any(status not in {"SUCCESS", "SUCCESS_WITH_REJECTIONS"} for status in statuses):
+            return "FAILED"
+        return "SUCCESS_WITH_REJECTIONS" if "SUCCESS_WITH_REJECTIONS" in statuses else "SUCCESS"
+
+    @staticmethod
+    def _silver_status(silver_result):
+        results = (
+            [silver_result]
+            if "status" in silver_result
+            else [item for item in silver_result.values() if isinstance(item, dict)]
+        )
+        return (
+            "SUCCESS_WITH_REJECTIONS"
+            if any(item.get("status") == "SUCCESS_WITH_REJECTIONS" for item in results)
+            else "SUCCESS"
+        )
 
     def _run_bronze_jobs(self, mode, load_date, resume_load_ids):
         combined: dict[str, dict] = {}

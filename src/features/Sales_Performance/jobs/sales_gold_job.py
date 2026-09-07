@@ -851,6 +851,7 @@ class GoldRunResult:
     constraints_verified: bool = False
     kpi_passed: bool = False
     previous_version: str | None = None
+    current_pointer: dict[str, Any] | None = None
     error_type: str | None = None
     error_message: str | None = None
 
@@ -868,6 +869,7 @@ class GoldRunResult:
             "constraints_verified": self.constraints_verified,
             "kpi_passed": self.kpi_passed,
             "previous_version": self.previous_version,
+            "current_pointer": self.current_pointer,
             "error_type": self.error_type,
             "error_message": self.error_message,
             "tables": {name: result.to_dict() for name, result in self.table_results.items()},
@@ -946,6 +948,7 @@ class SalesGoldJob:
                 constraints_verified=True,
                 kpi_passed=report.get("kpi_passed", publication.get("kpi_passed", False)),
                 previous_version=publication.get("previous_version"),
+                current_pointer=publication.get("current_pointer"),
             )
         except Exception as exc:
             if prepared is not None and hasattr(self.publisher, "mark_failed"):

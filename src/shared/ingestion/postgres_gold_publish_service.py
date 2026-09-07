@@ -90,12 +90,16 @@ class PostgresGoldPublishService:
                         counts=counts,
                     )
                     connection.connection.commit()
-                    return {
+                    current_pointer = {
                         "gold_version": gold_version,
                         "candidate_schema": candidate_schema,
                         "source_snapshot_id": source_snapshot_id,
                         "gold_run_id": gold_run_id,
                         "previous_version": previous["gold_version"] if previous else None,
+                    }
+                    return {
+                        **current_pointer,
+                        "current_pointer": current_pointer,
                         "published": True,
                         "audit_id": audit_id,
                     }

@@ -2,11 +2,38 @@ from src.core.settings import Settings, get_settings
 from src.shared.connectors.postgres_connector import PostgreSQLConnector
 
 
-def ensure_ingestion_schema(settings: Settings | None = None) -> None:
-    """Create durable ingestion metadata tables when a production service starts."""
+PLATFORM_SCHEMA_VERSION = "1"
+
+
+def ensure_ingestion_schema(settings: Settings | None = None) -> dict[str, object]:
+    """Apply non-destructive platform metadata DDL and record its version.
+
+    This helper owns only schemas and ingestion metadata. Published Bronze,
+    Silver, and Gold data are never dropped, truncated, or replaced here.
+    """
     with PostgreSQLConnector(settings=settings or get_settings()) as connection:
+        connection.execute_query("CREATE SCHEMA IF NOT EXISTS bronze")
+        connection.execute_query("CREATE SCHEMA IF NOT EXISTS silver")
+        connection.execute_query("CREATE SCHEMA IF NOT EXISTS gold")
         connection.execute_query("CREATE SCHEMA IF NOT EXISTS bronze_staging")
         connection.execute_query("CREATE SCHEMA IF NOT EXISTS silver_staging")
+        connection.execute_query(
+            """
+            CREATE TABLE IF NOT EXISTS bronze.platform_schema_version (
+                component VARCHAR(128) PRIMARY KEY,
+                version VARCHAR(64) NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute_query(
+            """
+            INSERT INTO bronze.platform_schema_version (component, version)
+            VALUES ('platform', %s)
+            ON CONFLICT (component) DO NOTHING
+            """,
+            (PLATFORM_SCHEMA_VERSION,),
+        )
         connection.execute_query(
             """
             CREATE TABLE IF NOT EXISTS bronze.pipeline_run_audit (
@@ -117,3 +144,20 @@ def ensure_ingestion_schema(settings: Settings | None = None) -> None:
             )
             """
         )
+    return {
+        "schema_version": PLATFORM_SCHEMA_VERSION,
+        "migration": "platform_metadata_v1",
+        "objects": [
+            "bronze",
+            "silver",
+            "gold",
+            "bronze_staging",
+            "silver_staging",
+            "bronze.platform_schema_version",
+            "bronze.pipeline_run_audit",
+            "bronze.table_load_audit",
+            "bronze.batch_load_audit",
+            "bronze.rejected_records",
+            "bronze.ingestion_batch_registry",
+        ],
+    }

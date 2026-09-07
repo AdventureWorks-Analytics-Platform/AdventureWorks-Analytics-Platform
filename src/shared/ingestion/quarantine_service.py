@@ -1,7 +1,6 @@
 from src.shared.ingestion.ingestion_models import RejectedRecord
 from src.core.settings import Settings, get_settings
 from src.shared.connectors.postgres_connector import PostgreSQLConnector
-from src.shared.ingestion.postgres_ingestion_schema import ensure_ingestion_schema
 
 
 class QuarantineService:
@@ -26,7 +25,6 @@ class PostgresQuarantineService:
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
-        ensure_ingestion_schema(self.settings)
 
     def record(self, rejected_record: RejectedRecord) -> RejectedRecord:
         with PostgreSQLConnector(settings=self.settings) as connection:

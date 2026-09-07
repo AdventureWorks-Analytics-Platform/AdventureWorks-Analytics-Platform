@@ -14,6 +14,9 @@ from src.shared.ingestion.ingestion_models import (
 from src.shared.ingestion.quarantine_service import PostgresQuarantineService
 
 
+pytestmark = pytest.mark.integration
+
+
 RUN_ID = "persistent-test-run"
 LOAD_ID = "persistent-test-load"
 BATCH_ID = "persistent-test-batch"

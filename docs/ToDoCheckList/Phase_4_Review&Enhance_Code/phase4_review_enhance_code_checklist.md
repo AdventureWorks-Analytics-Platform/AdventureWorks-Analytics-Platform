@@ -8,7 +8,7 @@
 | Current HEAD | `f6a681a` - Fix Phase 3 runtime and document current workflow |
 | Branch alignment | `Enhance_Project`, `main`, and `origin/main` point to the same commit |
 | Worktree status | Clean at review time |
-| Current test baseline | Focused Bronze/Silver/Gold regression and PostgreSQL integration evidence pass; latest focused run: `61 passed` |
+| Current test baseline | Unit selection `182 passed, 22 deselected`; focused Phase 4E run `24 passed`; full regression `204 passed` |
 | Test failure cause | Historical baseline failures were caused by PostgreSQL unavailable at `localhost:5432`; current runtime PostgreSQL and SQL Server evidence exists |
 | Current architecture | `App -> PipelineRunner -> BronzeToSilverPipeline -> SalesGoldJob`; Silver uses `silver_v<SNAPSHOT>` plus `silver_current_pointer`; Gold uses versioned candidate schema plus current pointer |
 | Phase objective | Make the Sales pipeline reliable, observable, testable, and runnable as one controlled workflow |
@@ -27,8 +27,8 @@
 
 | Area | Current state | Impact current | Enhancement target |
 |---|---|---|---|
-| Application orchestration | `PipelineRunner` executes health, placeholder bootstrap, Bronze/Silver, Silver gate through Gold job, and returns a dictionary; `App` maps status for compatibility | Full runtime path exists, but no CLI/exit-code/report delivery contract | Harden runner contract and add delivery boundary |
-| Bootstrap | `PlatformBootstrapJob.run()` still returns a placeholder success response | Schema and metadata readiness are not guaranteed by application code | Idempotent schema/bootstrap and version validation |
+| Application orchestration | `PipelineRunner` executes Settings/health, bootstrap/readiness, Bronze/Silver, Silver gate through Gold, and returns a structured dictionary; CLI provides exit/report delivery | Full runtime path and delivery boundary are implemented | Preserve contract while adding future scheduler integrations |
+| Bootstrap | `PlatformBootstrapJob.run()` owns idempotent metadata bootstrap and schema-version readiness | Required inventory/version must remain aligned with migrations | Keep bootstrap non-destructive and version-compatible |
 | Bronze ingestion | Class-based job loads seven source tables and validates row-count parity | Limited error isolation, retry, audit, and incremental-load protection | Per-table execution report, retry policy, audit records, and idempotency |
 | Silver transformation | Injectable job writes six targets to a versioned candidate and atomically updates `silver_current_pointer` | Standalone stage selection/readiness contract is not yet implemented | Keep pointer/gate ownership in Silver and expose explicit runner inputs |
 | Gold loading | Injectable `SalesGoldJob` builds fact batches, validates, constrains, audits, and atomically publishes a versioned candidate | Delivery/CLI boundary is not yet implemented | Keep Gold mechanics in the job; runner evaluates final result |
@@ -613,14 +613,14 @@ Any implementation that creates one monolithic platform Bronze job, duplicates b
 | [ ] | Gold quality | Validate referential integrity before publish | Check orphan keys and required dimensions before adding foreign keys | P0 | Not started | Constraint creation can fail late after data has been written | Errors are found before publication | Pre-publish validation report has zero invalid references | Gold job |
 | [ ] | Configuration | Introduce central typed settings | Consolidate SQL Server, PostgreSQL, batch, retry, and logging configuration | P1 | Not started | Connectors independently interpret environment variables | Configuration is validated once and shared consistently | Missing/invalid settings produce clear startup errors | Scope of settings |
 | [ ] | Configuration | Add environment template checks | Keep `.env.example` aligned with required runtime settings | P1 | Not started | New environments may miss required variables | Setup becomes reproducible | Automated check detects missing template keys | Settings model |
-| [ ] | Testing | Mark integration tests | Separate database-dependent tests from pure unit tests | P0 | Not started | `pytest` fails locally when PostgreSQL/SQL Server are unavailable | Developers can run fast unit tests independently | `pytest -m "not integration"` is deterministic; integration marker exists | Pytest configuration |
+| [x] | Testing | Mark integration tests | Separate database-dependent tests from pure unit tests | P0 | Done | `pytest` can otherwise hit unavailable PostgreSQL/SQL Server | Developers can run fast unit tests independently | `pytest -m "not integration"` is deterministic; integration marker exists | `pytest.ini`, marked integration modules |
 | [ ] | Testing | Add service fixtures and mocks | Test App and pipeline stage sequencing without live databases | P0 | Not started | Current App contract tests do not verify execution order or failure gates | Orchestration behavior is tested cheaply | Tests cover success, degraded health, stage failure, and exit status | Pipeline runner |
 | [ ] | Testing | Add integration test setup | Provide controlled PostgreSQL startup/fixture and explicit SQL Server prerequisite | P1 | Blocked | Current integration tests fail because Docker/PostgreSQL is unavailable | Integration evidence becomes reproducible | Documented setup passes connectivity and schema tests | Docker daemon; SQL Server |
 | [ ] | Testing | Add regression tests for reruns | Test full rerun, partial failure, duplicate prevention, and publish safety | P1 | Not started | Operational edge cases are unverified | Enhancements do not regress data integrity | Rerun and failure scenarios have automated assertions | Bronze/Gold reliability work |
 | [ ] | Observability | Standardize structured logging | Include run ID, stage, table, status, duration, and error context | P1 | Not started | Current logs are mostly connection-level and text-based | Faster diagnosis and better automation integration | Logs can be filtered by run/stage/table | Pipeline runner |
-| [ ] | Observability | Add pipeline summary report | Generate Markdown/JSON summary for every run | P1 | Not started | Results are scattered across console output and separate reports | Operators and reviewers get one evidence artifact | Report includes stage status, counts, durations, and failures | Standard result contract |
-| [ ] | Delivery | Add CI checks | Run unit tests, integration-aware test selection, lint, formatting, and type checks | P1 | Not started | Quality depends on manual local execution | Regressions are caught before merge | CI status is required for enhancement branch merge | Test commands |
-| [ ] | Delivery | Update operational documentation | Document one-command execution, prerequisites, recovery, and troubleshooting | P1 | Not started | Current documentation accurately describes manual workflow but not target operation | Users can run and recover the platform consistently | README and runbook match implemented behavior | Pipeline implementation |
+| [x] | Observability | Add pipeline summary report | Generate Markdown/JSON summary for every run | P1 | Done | Results were scattered across console output and separate reports | Operators and reviewers get one evidence artifact | Report includes stage status, counts, durations, failures, and report metadata | `src/app/reporter.py`, `docs/project/PHASE_4E_EVIDENCE.md` |
+| [x] | Delivery | Add CI checks | Run unit tests, integration-aware test selection, lint, formatting, and type checks | P1 | Done | Quality depended on manual local execution | Regressions are caught before merge | CI workflow runs unit/quality/integration-aware jobs and retains artifacts | `.github/workflows/ci.yml` |
+| [x] | Delivery | Update operational documentation | Document one-command execution, prerequisites, recovery, and troubleshooting | P1 | Done | Manual workflow lacked target operational detail | Users can run and recover the platform consistently | README/runbook match implemented behavior | `README.md`, `docs/project/PHASE_4E_RUNBOOK.md` |
 
 ## Recommended implementation order
 
@@ -643,9 +643,9 @@ Any implementation that creates one monolithic platform Bronze job, duplicates b
 - [ ] Silver and Gold validations are enforced as pipeline gates.
 - [ ] Bronze loads have audit history and explicit rerun behavior.
 - [ ] Gold publication does not destroy the last valid dataset when a build fails.
-- [ ] Unit tests run without external services; integration tests are explicitly marked and documented.
-- [ ] CI runs the agreed test, lint, formatting, and type-check commands.
-- [ ] Operational documentation and this checklist reflect the implemented behavior.
+- [x] Unit tests run without external services; integration tests are explicitly marked and documented.
+- [x] CI runs the agreed test, lint, formatting, and type-check commands.
+- [x] Operational documentation and this checklist reflect the implemented behavior.
 
 ## Evidence log
 
@@ -654,3 +654,4 @@ Any implementation that creates one monolithic platform Bronze job, duplicates b
 | 2026-09-03 | Branch and worktree review | `Enhance_Project` at `f6a681a`; worktree clean | Git branch/status review |
 | 2026-09-03 | Test baseline | `31 passed, 3 failed` | `pytest -q` |
 | 2026-09-03 | Database environment | PostgreSQL unavailable at `localhost:5432`; Docker daemon unavailable | PostgreSQL connection errors and `docker compose ps` |
+| 2026-09-07 | Phase 4E delivery evidence | Unit lane `182 passed, 22 deselected`; focused Phase 4E `25 passed`; full regression `204 passed`; integration lane `22 passed`; CLI help, compile, and diff checks pass | `docs/project/PHASE_4E_EVIDENCE.md`, `.github/workflows/ci.yml` |

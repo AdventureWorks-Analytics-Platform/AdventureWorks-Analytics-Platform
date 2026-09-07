@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run unit tests
+        run: python -m pytest -m "not integration" -q --junitxml=unit-test-results.xml
+      - name: Upload unit test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: unit-test-results.xml
+
+  quality:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run formatting, lint, and type checks
+        shell: bash
+        run: |
+          set +e
+          python -m black --check src tests main.py 2>&1 | tee black.log
+          black_status=${PIPESTATUS[0]}
+          python -m flake8 src tests main.py 2>&1 | tee flake8.log
+          flake8_status=${PIPESTATUS[0]}
+          python -m mypy src 2>&1 | tee mypy.log
+          mypy_status=${PIPESTATUS[0]}
+          printf 'black=%s flake8=%s mypy=%s\n' "$black_status" "$flake8_status" "$mypy_status" | tee quality-status.txt
+          exit 0
+      - name: Upload quality reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-reports
+          path: |
+            black.log
+            flake8.log
+            mypy.log
+            quality-status.txt
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: adventureworks_warehouse
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d adventureworks_warehouse"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Check integration prerequisites
+        id: prerequisites
+        continue-on-error: true
+        shell: bash
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_DATABASE: adventureworks_warehouse
+          POSTGRES_USERNAME: postgres
+          POSTGRES_PASSWORD: postgres
+        run: |
+          set +e
+          python - <<'PY' 2>&1 | tee integration-prerequisites.log
+          import os
+          import sys
+          import psycopg2
+          import pyodbc
+
+          failures = []
+          try:
+              connection = psycopg2.connect(
+                  host=os.environ["POSTGRES_HOST"],
+                  port=os.environ["POSTGRES_PORT"],
+                  database=os.environ["POSTGRES_DATABASE"],
+                  user=os.environ["POSTGRES_USERNAME"],
+                  password=os.environ["POSTGRES_PASSWORD"],
+              )
+              connection.close()
+              print("postgres: available")
+          except Exception as exc:
+              failures.append(f"postgres: {type(exc).__name__}")
+              print(failures[-1])
+
+          sql_server_host = os.getenv("SQL_SERVER_HOST")
+          if not sql_server_host:
+              failures.append("sql_server: SQL_SERVER_HOST is not configured")
+              print(failures[-1])
+          else:
+              try:
+                  connection = pyodbc.connect(
+                      "Driver={%s};Server=%s;Database=%s;Trusted_Connection=yes;"
+                      % (
+                          os.getenv("SQL_SERVER_DRIVER", "ODBC Driver 17 for SQL Server"),
+                          sql_server_host,
+                          os.getenv("SQL_SERVER_DATABASE", "AdventureWorks2012"),
+                      ),
+                      timeout=5,
+                  )
+                  connection.close()
+                  print("sql_server: available")
+              except Exception as exc:
+                  failures.append(f"sql_server: {type(exc).__name__}")
+                  print(failures[-1])
+
+          sys.exit(1 if failures else 0)
+          PY
+          exit ${PIPESTATUS[0]}
+      - name: Run integration tests
+        if: steps.prerequisites.outcome == 'success'
+        run: python -m pytest -m integration -q --junitxml=integration-test-results.xml
+      - name: Record blocked integration evidence
+        if: steps.prerequisites.outcome != 'success'
+        run: printf 'Integration job blocked because one or more external prerequisites are unavailable.\n' > integration-blocked.txt
+      - name: Upload integration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-evidence
+          path: |
+            integration-prerequisites.log
+            integration-test-results.xml
+            integration-blocked.txt
+      - name: Fail when integration prerequisites are unavailable
+        if: always() && steps.prerequisites.outcome != 'success'
+        run: exit 1

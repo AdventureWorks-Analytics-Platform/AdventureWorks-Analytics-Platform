@@ -124,6 +124,30 @@ In the current wiring, `App` registers `PostgresSilverPublishService` for Silver
 
 The Gold implementation and stage are now connected to the application entry point. Before publication, Gold maintains the fail-closed principle and does not change the serving version if the candidate does not pass.
 
+## Operational CLI
+
+The delivery entry point supports the validated Phase 4E contract:
+
+```text
+python -m src.app.cli --mode full --stage full --report logs/pipeline.json
+python -m src.app.cli --mode incremental --stage bronze --report logs/bronze.md --report-format markdown
+python -m src.app.cli --mode full --stage full --log-level INFO --report logs/pipeline.json
+```
+
+`full` runs Bronze -> Silver -> Gold. Standalone `silver` requires `--recovery-snapshot` containing an explicit Bronze snapshot; standalone `gold` requires `--source-snapshot-id`. The runner returns `SUCCESS`, `SUCCESS_WITH_REJECTIONS`, `PARTIAL_SUCCESS`, or `FAILED`; the CLI maps those statuses to process exit codes and is the only layer that writes reports. Exit code `0` is reserved for `SUCCESS` and `SUCCESS_WITH_REJECTIONS`; report delivery failures are non-zero.
+
+## Tests and CI
+
+Run tests that do not require external databases with:
+
+```text
+python -m pytest -m "not integration" -q
+```
+
+Tests requiring SQL Server or PostgreSQL carry the `integration` marker. CI runs unit tests, Black, Flake8, and MyPy checks, then runs the integration lane only after checking its database prerequisites. Unavailable integration services are recorded as blocked evidence rather than reported as application success. CI retains test, quality, and prerequisite diagnostics as artifacts.
+
+Bootstrap owns schema creation and readiness. PostgreSQL services validate/use dependencies but do not create ingestion metadata in their constructors. For recovery, inspect the JSON report, repair the failed dependency or staging state, and rerun with the same explicit snapshot input; published current pointers are preserved by the stage jobs.
+
 ## Data Results by Layer
 
 | Layer | Role | Result |
@@ -274,8 +298,10 @@ The main test groups cover:
 - Phase 4B Bronze runtime: implemented with persistent audit/quarantine, staging, retry/reconciliation, and atomic publication.
 - Phase 4C Silver runtime: implemented with chunked deterministic processing, validation, deduplication, checkpoints, and a publication gate.
 - Phase 4D Gold runtime: implemented with an injectable job, Silver snapshot gate, candidate staging, integrity/KPI validation, constraint verification, and atomic publication.
-- Gold focused tests: 52 tests based on the available evidence.
-- Repository regression: 183 tests in the latest validation run.
+- Phase 4E focused delivery tests: 16 passed.
+- Unit selection: 182 passed, 22 deselected with `-m "not integration"`.
+- Focused Phase 4E delivery tests: 24 passed.
+- Repository regression: 204 passed in the latest validation run.
 
 
 ## Notes

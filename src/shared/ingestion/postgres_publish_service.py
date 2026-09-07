@@ -7,7 +7,6 @@ from sqlalchemy.pool import StaticPool
 
 from src.core.settings import Settings, get_settings
 from src.shared.connectors.postgres_connector import PostgreSQLConnector
-from src.shared.ingestion.postgres_ingestion_schema import ensure_ingestion_schema
 
 
 class PostgresPublishService:
@@ -25,7 +24,6 @@ class PostgresPublishService:
         self.settings = settings or get_settings()
         self.staging_schema = staging_schema or type(self).staging_schema
         self.published_schema = published_schema or type(self).published_schema
-        ensure_ingestion_schema(self.settings)
 
     def publish(
         self,
@@ -221,7 +219,6 @@ class PostgresSilverStagingWriter:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
         self._initialized_tables: set[str] = set()
-        ensure_ingestion_schema(self.settings)
 
     def __call__(self, frame: pd.DataFrame, staging_table: str) -> None:
         PostgresPublishService._validate_identifier(staging_table)

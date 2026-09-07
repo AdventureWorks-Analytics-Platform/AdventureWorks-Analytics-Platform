@@ -97,7 +97,7 @@ class App:
         settings: Settings | None = None,
     ):
         self.settings = settings or get_settings()
-        self.bootstrap_job = bootstrap_job or PlatformBootstrapJob()
+        self.bootstrap_job = bootstrap_job or PlatformBootstrapJob(self.settings)
         self.health_service = health_service or ConnectionHealthService(self.settings)
         self.bronze_job = bronze_job or SalesBronzeIngestionJob(self.settings)
         silver_staging_writer = PostgresSilverStagingWriter(self.settings)
@@ -138,5 +138,7 @@ class App:
         result = runner.run(mode="full")
         return {
             **result,
-            "status": "ok" if result["status"] == "SUCCESS" else "degraded",
+            "status": "ok"
+            if result["status"] in {"SUCCESS", "SUCCESS_WITH_REJECTIONS", "PARTIAL_SUCCESS"}
+            else "degraded",
         }

@@ -1,6 +1,5 @@
 from src.core.settings import Settings, get_settings
 from src.shared.connectors.postgres_connector import PostgreSQLConnector
-from src.shared.ingestion.postgres_ingestion_schema import ensure_ingestion_schema
 
 
 class PostgresReconciliationService:
@@ -8,7 +7,6 @@ class PostgresReconciliationService:
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
-        ensure_ingestion_schema(self.settings)
 
     def resolve(
         self, staging_name: str, batch_id: str, content_hash: str

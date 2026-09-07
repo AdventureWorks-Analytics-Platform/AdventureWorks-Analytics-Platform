@@ -4,13 +4,19 @@
 real orchestration to the application layer."""
 
 from src.app.app import App
+from src.app.cli import main as cli_main
 
 
-def main():
-    """Launch the application through the app layer."""
+def run_application():
+    """Run the application and preserve the dictionary result API."""
     app = App()
     return app.run()
 
 
+def main(argv=None):
+    """Run the process-facing CLI and return its exit code."""
+    return cli_main(argv=argv, app_factory=App)
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

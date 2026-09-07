@@ -9,6 +9,9 @@ from src.shared.connectors import SQLServerConnector, PostgreSQLConnector
 from scripts.ingestion.bronze.bronze_ingest import bronze_ingest_table
 
 
+pytestmark = pytest.mark.integration
+
+
 class TestSQLServerConnectivity:
     """Test SQL Server connectivity."""
     

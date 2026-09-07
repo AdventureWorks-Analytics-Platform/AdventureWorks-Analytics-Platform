@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 
 from src.core.settings import Settings, get_settings
 from src.shared.connectors.postgres_connector import PostgreSQLConnector
-from src.shared.ingestion.postgres_ingestion_schema import ensure_ingestion_schema
 from src.shared.ingestion.ingestion_models import (
     BatchLoadAudit,
     RunAudit,
@@ -103,7 +102,6 @@ class PostgresAuditService:
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
-        ensure_ingestion_schema(self.settings)
 
     def record_run(self, audit: RunAudit) -> RunAudit:
         with PostgreSQLConnector(settings=self.settings) as connection:

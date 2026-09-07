@@ -11,6 +11,9 @@ from src.shared.ingestion.postgres_reconciliation_service import (
 from src.shared.ingestion.postgres_ingestion_schema import ensure_ingestion_schema
 
 
+pytestmark = pytest.mark.integration
+
+
 TARGET = "w4_atomic_publish"
 STAGING = "w4_atomic_publish__run_1__load_1"
 BATCH = "w4-unknown-commit"

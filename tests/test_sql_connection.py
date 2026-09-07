@@ -9,6 +9,9 @@ import pytest
 from dotenv import load_dotenv
 import pyodbc
 
+
+pytestmark = pytest.mark.integration
+
 # Load environment variables
 load_dotenv()
 
