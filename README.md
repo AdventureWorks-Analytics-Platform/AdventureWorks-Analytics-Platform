@@ -277,14 +277,6 @@ The main test groups cover:
 - Gold focused tests: 52 tests based on the available evidence.
 - Repository regression: 183 tests in the latest validation run.
 
-## Related Documentation
-
-- [Architecture refactor summary](ARCHITECTURE_REFACTOR_SUMMARY.md)
-- [Phase 4A execution plan](docs/project/PHASE_4A_FOUNDATION_EXECUTION_VI.md)
-- [Phase 4B Bronze execution spec](docs/internal/phase4b_bronzelayer_execution_spec.md)
-- [Phase 4C Silver execution spec](docs/internal/phase4c_silverlayer_execution_vi.md)
-- [Phase 4D Gold execution spec](docs/internal/phase4d_goldlayer_execution_vi.md)
-- [Working standards](docs/internal/WORKING_STANDARDS.md)
 
 ## Notes
 
