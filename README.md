@@ -139,6 +139,52 @@ The dashboard is the final data consumption layer. It presents Sales Performance
 
 ![Sales Performance Dashboard](Dashboard/SalesPerformanceDashboard.png)
 
+## Workflow overview
+
+```mermaid
+flowchart TD
+    A[main.py] --> B[App.run]
+    B --> C[PipelineRunner.run]
+    C --> D[ConnectionHealthService.check_all]
+    D -->|degraded| X1[FAILED health]
+    D -->|ok| E[PlatformBootstrapJob.run]
+    E -->|not ok| X2[FAILED bootstrap]
+    E -->|ok| F[BronzeToSilverPipeline.run]
+    F --> G1[SalesBronzeIngestionJob]
+    F --> G2[PersonBronzeJob]
+    F --> G3[ProductionBronzeJob]
+    G1 --> H[Merge 7 Bronze results]
+    G2 --> H
+    G3 --> H
+    H --> I[Annotate snapshot_id]
+    I --> J[BronzeSnapshotGate]
+    J -->|fail| X3[FAILED Bronze gate]
+    J -->|pass| K[SalesSilverJob]
+    K --> L[Read Bronze in chunks]
+    L --> M[Validate, transform, quarantine, deduplicate]
+    M --> N[Silver staging + checkpoint]
+    N --> O[Whole-table validation]
+    O -->|fail| X4[FAILED Silver table]
+    O -->|pass| P[Promote 6 tables into silver_v<SNAPSHOT>]
+    P --> P2[Validate complete candidate]
+    P2 -->|pass| P3[Update silver current pointer]
+    P2 -->|fail| X4b[Keep previous Silver pointer]
+    P3 --> Q[Silver result]
+    Q --> R[PipelineRunner result]
+    Q --> U[SilverSnapshotGate]
+    U -->|fail| X5[FAILED Gold gate]
+    U -->|pass| V[SalesGoldJob]
+    V --> W[5 dimensions full-read]
+    V --> Y[fact_sales stable-key batches]
+    W --> Z[Candidate Gold version]
+    Y --> Z
+    Z --> AA[Integrity, constraint, KPI validation]
+    AA -->|pass| AB[Atomic current pointer publish]
+    AA -->|fail| AC[Keep previous Gold]
+    AB --> R[PipelineRunner result]
+```
+
+
 ## Repository Structure
 
 ```text

@@ -40,7 +40,11 @@ class BronzeLoader:
                     method="multi",
                     chunksize=1000,
                 )
+                pg_conn.connection.commit()
                 return len(df), True
+            except Exception:
+                pg_conn.connection.rollback()
+                raise
             finally:
                 engine.dispose()
 
@@ -57,6 +61,9 @@ class BronzeLoader:
                     f'SELECT * FROM "{self.staging_schema}"."{staging_table}"',
                     engine,
                 )
+            except Exception:
+                pg_conn.connection.rollback()
+                raise
             finally:
                 engine.dispose()
 

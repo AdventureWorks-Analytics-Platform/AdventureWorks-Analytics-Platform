@@ -201,6 +201,8 @@ SALES_SILVER_TABLE_SPECS = (
 class SilverTransformationJob:
     """Encapsulate Silver transformations behind a reusable, injectable job contract."""
 
+    allowed_silver_statuses = {"SUCCESS", "SUCCESS_WITH_REJECTIONS"}
+
     def __init__(
         self,
         table_specs: Iterable[TableSpec] | None = None,
@@ -803,6 +805,10 @@ class SilverTransformationJob:
         identity = ExecutionIdentity.create()
         resolved_run_id = run_id or identity.run_id
         resolved_load_id = load_id or identity.load_id
+        candidate_schema = None
+        snapshot_started = hasattr(self.publish_service, "begin_snapshot")
+        if snapshot_started:
+            candidate_schema = self.publish_service.begin_snapshot(resolved_run_id)
 
         for spec in self.table_specs:
             table_started_at = utc_now()
@@ -1044,9 +1050,15 @@ class SilverTransformationJob:
                     staging.name, validation_report
                 )
                 if self.publish_service is not None:
-                    published_target = self.publish_service.publish(
-                        spec.target_table, staging.name, validation_report
-                    )
+                    if candidate_schema is not None:
+                        published_target = self.publish_service.publish(
+                            spec.target_table, staging.name, validation_report,
+                            candidate_schema=candidate_schema,
+                        )
+                    else:
+                        published_target = self.publish_service.publish(
+                            spec.target_table, staging.name, validation_report
+                        )
                 else:
                     self.writer(silver_frame, spec.target_table)
                     published_target = spec.target_name
@@ -1102,6 +1114,14 @@ class SilverTransformationJob:
                 "SUCCESS_WITH_REJECTIONS" if rows_rejected else "SUCCESS",
                 rows_written,
             )
+        if candidate_schema is not None:
+            successful = len(results) == len(self.table_specs) and all(
+                item.get("status") in self.allowed_silver_statuses for item in results.values()
+            )
+            if successful:
+                self.publish_service.finalize_snapshot(candidate_schema, resolved_run_id)
+            else:
+                self.publish_service.cleanup_snapshot(candidate_schema)
         return results
 
 

@@ -54,9 +54,9 @@ def _engine(connection):
     return create_engine("postgresql://", creator=lambda: connection, poolclass=StaticPool)
 
 
-def _read(engine, table: str, source_snapshot_id: str) -> pd.DataFrame:
+def _read(engine, table: str, source_snapshot_id: str, schema: str = "silver") -> pd.DataFrame:
     return pd.read_sql_query(
-        f'SELECT * FROM silver."{table}" WHERE "source_snapshot_id" = %(snapshot_id)s',
+        f'SELECT * FROM "{schema}"."{table}" WHERE "source_snapshot_id" = %(snapshot_id)s',
         engine,
         params={"snapshot_id": source_snapshot_id},
     )
@@ -185,18 +185,31 @@ class _PostgresGoldReader:
         with PostgreSQLConnector(settings=self.settings) as pg:
             engine = _engine(pg.connection)
             try:
-                return _read(engine, table, source_snapshot_id)
+                schema = self._schema(engine, source_snapshot_id)
+                return _read(engine, table, source_snapshot_id, schema)
             finally:
                 engine.dispose()
+
+    @staticmethod
+    def _schema(engine, source_snapshot_id: str) -> str:
+        pointer = pd.read_sql_query(
+            "SELECT candidate_schema, source_snapshot_id "
+            "FROM silver.silver_current_pointer WHERE pointer_id = 1",
+            engine,
+        )
+        if pointer.empty or pointer.iloc[0]["source_snapshot_id"] != source_snapshot_id:
+            raise ValueError("Silver current pointer does not match requested source snapshot")
+        return str(pointer.iloc[0]["candidate_schema"])
 
     def fact_batches(self, *, source_snapshot_id: str, batch_size: int) -> Iterator[FactBatch]:
         with PostgreSQLConnector(settings=self.settings) as pg:
             engine = _engine(pg.connection)
             try:
+                schema = self._schema(engine, source_snapshot_id)
                 bounds = pd.read_sql_query(
                     'SELECT MIN(sales_order_detail_id) AS lower_bound, '
                     'MAX(sales_order_detail_id) AS upper_bound '
-                    'FROM silver."sales_order_detail_clean" '
+                    f'FROM "{schema}"."sales_order_detail_clean" '
                     'WHERE "source_snapshot_id" = %(snapshot_id)s',
                     engine,
                     params={"snapshot_id": source_snapshot_id},
@@ -204,7 +217,7 @@ class _PostgresGoldReader:
                 lower_bound = None
                 maximum = bounds["upper_bound"]
                 batch_number = 0
-                headers = _read(engine, "sales_order_header_clean", source_snapshot_id)
+                headers = _read(engine, "sales_order_header_clean", source_snapshot_id, schema)
                 while pd.notna(maximum) and (lower_bound is None or lower_bound < maximum):
                     upper_bound = (
                         int(maximum)
@@ -215,7 +228,7 @@ class _PostgresGoldReader:
                         f' AND "sales_order_detail_id" > {int(lower_bound)}'
                     )
                     details = pd.read_sql_query(
-                        'SELECT * FROM silver."sales_order_detail_clean" '
+                        f'SELECT * FROM "{schema}"."sales_order_detail_clean" '
                         'WHERE "source_snapshot_id" = %(snapshot_id)s '
                         f'{lower_sql} '
                         f'AND "sales_order_detail_id" <= {upper_bound} '
