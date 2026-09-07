@@ -8,9 +8,9 @@
 | Current HEAD | `f6a681a` - Fix Phase 3 runtime and document current workflow |
 | Branch alignment | `Enhance_Project`, `main`, and `origin/main` point to the same commit |
 | Worktree status | Clean at review time |
-| Current test baseline | `31 passed, 3 failed` |
-| Test failure cause | PostgreSQL was unavailable at `localhost:5432`; Docker daemon was not running |
-| Current architecture | Bronze is invoked by `App`; Silver and Gold are standalone modules |
+| Current test baseline | Focused Bronze/Silver/Gold regression and PostgreSQL integration evidence pass; latest focused run: `61 passed` |
+| Test failure cause | Historical baseline failures were caused by PostgreSQL unavailable at `localhost:5432`; current runtime PostgreSQL and SQL Server evidence exists |
+| Current architecture | `App -> PipelineRunner -> BronzeToSilverPipeline -> SalesGoldJob`; Silver uses `silver_v<SNAPSHOT>` plus `silver_current_pointer`; Gold uses versioned candidate schema plus current pointer |
 | Phase objective | Make the Sales pipeline reliable, observable, testable, and runnable as one controlled workflow |
 | Owner | AI / User |
 | Review date | 2026-09-03 |
@@ -27,11 +27,11 @@
 
 | Area | Current state | Impact current | Enhancement target |
 |---|---|---|---|
-| Application orchestration | `App.run()` executes health check, placeholder bootstrap, and Bronze only | No single command controls Bronze -> Silver -> Gold | One pipeline runner with explicit stages, status, failure policy, and exit code |
-| Bootstrap | `PlatformBootstrapJob.run()` returns a placeholder success response | Schema and metadata readiness are not guaranteed by application code | Idempotent schema/bootstrap and version validation |
+| Application orchestration | `PipelineRunner` executes health, placeholder bootstrap, Bronze/Silver, Silver gate through Gold job, and returns a dictionary; `App` maps status for compatibility | Full runtime path exists, but no CLI/exit-code/report delivery contract | Harden runner contract and add delivery boundary |
+| Bootstrap | `PlatformBootstrapJob.run()` still returns a placeholder success response | Schema and metadata readiness are not guaranteed by application code | Idempotent schema/bootstrap and version validation |
 | Bronze ingestion | Class-based job loads seven source tables and validates row-count parity | Limited error isolation, retry, audit, and incremental-load protection | Per-table execution report, retry policy, audit records, and idempotency |
-| Silver transformation | Standalone script cleans and writes six Silver tables | Cannot be controlled or reported by `App`; failure handling is procedural | Service/job interface reusable by orchestration and tests |
-| Gold loading | Standalone script drops and recreates Gold tables, then adds constraints | A mid-run failure can leave Gold incomplete or unavailable | Staging/publish strategy with atomic or recoverable loads |
+| Silver transformation | Injectable job writes six targets to a versioned candidate and atomically updates `silver_current_pointer` | Standalone stage selection/readiness contract is not yet implemented | Keep pointer/gate ownership in Silver and expose explicit runner inputs |
+| Gold loading | Injectable `SalesGoldJob` builds fact batches, validates, constrains, audits, and atomically publishes a versioned candidate | Delivery/CLI boundary is not yet implemented | Keep Gold mechanics in the job; runner evaluates final result |
 | Validation | Silver and Gold validations are separate scripts | Validation is not enforced as a pipeline gate | Validation stages that can stop publication and return evidence |
 | Configuration | Connectors read environment variables independently | Configuration is duplicated and difficult to validate consistently | Central typed settings object and environment validation |
 | Testing | Unit coverage exists; database tests run by default | Local test runs fail without external services and integration scope is unclear | Separate unit/integration markers, fixtures, and CI execution policy |

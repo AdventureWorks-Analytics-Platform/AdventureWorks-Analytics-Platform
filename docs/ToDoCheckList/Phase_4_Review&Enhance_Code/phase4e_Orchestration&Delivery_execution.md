@@ -98,14 +98,16 @@ A failed configuration, connectivity/readiness check, bootstrap, required Bronze
 
 ### 3.1 Confirmed implementation surface
 
+> **Runtime reconciliation (2026-09-07):** Phase 4E is partially implemented. The canonical `App -> PipelineRunner -> BronzeToSilverPipeline -> SalesGoldJob` path now executes Bronze, Silver, and Gold, including the versioned Silver current pointer and Gold atomic publication. The remaining Phase 4E delivery work is still open: real bootstrap/readiness, CLI/exit-code separation, JSON/Markdown report delivery, integration marker policy, and CI.
+
 | Area | Current location | Current behavior | Phase 4E concern |
 |---|---|---|---|
-| Application entrypoint | `main.py` | Creates `App()` and returns `app.run()` | Does not expose CLI options or convert result to process exit code |
-| Application orchestration | `src/app/app.py` | Runs health check, placeholder bootstrap, and Bronze only | No complete Silver/Gold lifecycle, stage contract, failure policy, or summary |
+| Application entrypoint | `main.py` | Creates `App()` and returns `app.run()`; `__main__` does not call `SystemExit` | Does not expose CLI options or convert result to process exit code |
+| Application orchestration | `src/app/app.py`, `src/app/pipeline_runner.py` | Runs health -> bootstrap placeholder -> Bronze/Silver -> Gold; `App` maps internal `SUCCESS` to external `ok` | Full data lifecycle exists, but readiness, CLI, exit-code, and report contracts are not implemented |
 | Health service | `src/shared/services/connection_health_service.py` | Checks SQL Server/PostgreSQL and returns `ok`/`degraded` | Health result does not currently gate bootstrap or data processing |
 | Bootstrap | `src/jobs/platform_bootstrap.py` | Returns a hard-coded success response | Does not create/check schemas, metadata, migrations, or schema version |
-| Silver | `scripts/transformation/silver/sales_silver_clean.py` | Standalone full-table transformation | Phase 4C must expose an injectable job for the runner |
-| Gold | `scripts/warehouse/postgres/gold/sales_gold_load.py` | Standalone destructive loader | Phase 4D must expose safe job/service for the runner |
+| Silver | `src/features/Sales_Performance/jobs/sales_silver_job.py`, `PostgresSilverPublishService` | Injectable job writes a complete `silver_v<SNAPSHOT>` candidate and updates `silver.silver_current_pointer` after all six targets pass | Phase 4E must treat the Silver pointer/gate as an upstream contract, not reimplement Silver publication |
+| Gold | `src/features/Sales_Performance/jobs/sales_gold_job.py`, PostgreSQL Gold adapters | Injectable Gold job owns fact batches, validation, constraints, KPI, candidate schema, audit, and atomic current pointer | Phase 4E must invoke/evaluate Gold result without duplicating Gold mechanics |
 | Result contract | `src/shared/ingestion/ingestion_models.py` | Shared ingestion statuses and table result shape | Runner needs stage/pipeline result aggregation without losing table context |
 | Test configuration | `pytest.ini` | Defines `pythonpath` and `testpaths` only | No `integration` marker or default unit/integration policy |
 | CI | Repository root | No `.github` directory/workflow was found | Quality checks are not automated |
@@ -114,6 +116,8 @@ A failed configuration, connectivity/readiness check, bootstrap, required Bronze
 ### 3.2 Falsifiable orchestration hypothesis
 
 The primary orchestration defect is that `App.run()` ignores health status when deciding whether to execute bootstrap and Bronze. A fake service test that returns degraded health and records calls should show that bootstrap and all data jobs are not invoked. A second fake-stage test should show that a failed Silver validation prevents Gold invocation. If either test records downstream calls, the gate belongs in the runner boundary rather than in individual jobs.
+
+**Current evidence:** `PipelineRunner` already stops before bootstrap/data stages when health is not `ok`, stops before Gold when Bronze/Silver returns non-success, and propagates the pipeline snapshot plus Silver result into `SalesGoldJob`. The remaining unverified boundary is post-bootstrap readiness because `PlatformBootstrapJob` still returns a hard-coded response.
 
 ### 3.3 Compatibility surface
 
@@ -421,7 +425,9 @@ Update this table after each task. A task may be marked `Done` only after implem
 | Date | Task | Files/symbols | Validation command | Result | Status |
 |---|---|---|---|---|---|
 | 2026-09-04 | Create Phase 4E orchestration and delivery scope | `docs/ToDoCheckList/Phase_4_Review&Enhance_Code/phase4_Orchestration&Delivery_execution.md` | Markdown review | Document created; implementation not started | Done |
-| 2026-09-04 | Baseline current orchestration/delivery behavior | `main.py`, `src/app/app.py`, `src/jobs/platform_bootstrap.py`, `connection_health_service.py`, `pytest.ini`, `README.md` | Source/configuration inspection | Health does not gate processing; bootstrap is placeholder; no CLI exit/report contract; no integration marker or CI workflow found | Done |
+| 2026-09-04 | Baseline current orchestration/delivery behavior | `main.py`, `src/app/app.py`, `src/jobs/platform_bootstrap.py`, `connection_health_service.py`, `pytest.ini`, `README.md` | Source/configuration inspection | Historical baseline: bootstrap was placeholder; delivery contract, integration marker, and CI were absent. Current runner now gates on health and invokes Bronze/Silver/Gold, but bootstrap/readiness and delivery gaps remain. | Superseded |
+| 2026-09-07 | Reconcile Phase 4E with current Bronze-to-Gold runtime | `src/app/pipeline_runner.py`, `src/app/app.py`, `src/features/Sales_Performance/jobs/sales_silver_job.py`, `src/features/Sales_Performance/jobs/sales_gold_job.py`, PostgreSQL pointers | `python -m pytest tests/test_bronze_publish.py tests/test_silver_job.py tests/test_silver_pipeline_gate.py tests/test_postgres_gold_constraints_integration.py tests/test_postgres_gold_candidate_integration.py tests/test_postgres_gold_publish_integration.py tests/test_postgres_gold_reconciliation_integration.py tests/test_gold_job.py tests/test_gold_fact_staging.py tests/test_gold_validation.py tests/test_gold_kpi.py -q` | `61 passed`; runtime verified full Bronze -> Silver -> Gold with Silver pointer `9f3148f1-9313-4b87-ba99-8e60727b08d7`, Gold `v008`, `PUBLISHED`, validation/constraints/KPI pass, and zero active PostgreSQL sessions. | Done |
+| 2026-09-07 | Identify remaining Phase 4E delivery gaps | `src/jobs/platform_bootstrap.py`, `main.py`, `pytest.ini`, repository root | Source/configuration inspection | Bootstrap remains hard-coded; no post-bootstrap readiness service, CLI parser, process exit-code mapping, JSON/Markdown reporter, integration marker, or CI workflow exists. | In progress |
 | TBD | Implement health/readiness gate | TBD | TBD | TBD | Not started |
 | TBD | Implement idempotent bootstrap/version check | TBD | TBD | TBD | Not started |
 | TBD | Implement `PipelineRunner` and stage failure policy | TBD | TBD | TBD | Not started |

@@ -8,11 +8,7 @@ from uuid import uuid4
 
 
 class PipelineRunner:
-    """Coordinate platform gates and enabled data stages.
-
-    Gold is registered as a future stage but remains NOT_REQUESTED until its
-    implementation and publication contract are enabled.
-    """
+    """Coordinate the canonical Bronze-to-Gold pipeline stages and gates."""
 
     def __init__(
         self,
