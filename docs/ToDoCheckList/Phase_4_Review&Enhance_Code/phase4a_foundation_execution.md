@@ -107,7 +107,7 @@ Create one typed, validated, and injectable `Settings` object. Process environme
 | 1.1 | Add `pydantic-settings` to `requirements.txt` | Dependency imports successfully | Dependency/import test | Not started |
 | 1.2 | Create `src/core/settings.py` | Uses `BaseSettings`, `SettingsConfigDict`, `SecretStr`, and cached `get_settings()` | Settings construction test | Done |
 | 1.3 | Define connection fields | SQL Server/PostgreSQL host, port, database, driver, and auth mode parse correctly | Field parsing test | Done |
-| 1.4 | Define runtime fields | `batch_size > 0`, retry attempts in `1..10`, and valid delays | Invalid value test | Done |
+| 1.4 | Define runtime fields | `batch_size > 0`, `bronze_rejected_threshold >= 0`, `silver_rejected_threshold >= 0`, retry attempts in `1..3`, and valid delays | Invalid value test | Done |
 | 1.5 | Validate authentication | `windows` does not require credentials; `sql` requires username/password | Authentication matrix test | Done |
 | 1.6 | Redact secrets | Password uses `SecretStr`; safe summary excludes secrets | Redaction test | Done |
 | 1.7 | Inject Settings | App, connectors, services, and jobs use the same instance | Constructor/usage test | Done |
@@ -134,7 +134,9 @@ postgres_database: str
 postgres_username: str
 postgres_password: SecretStr
 batch_size: int > 0
-retry_max_attempts: int 1..10
+bronze_rejected_threshold: int >= 0
+silver_rejected_threshold: int >= 0
+retry_max_attempts: int 1..3
 retry_initial_delay_seconds: float > 0
 retry_max_delay_seconds: float > 0
 ```
@@ -144,7 +146,12 @@ Rules:
 - Process environment variables have precedence over `.env`.
 - Missing or invalid configuration must fail before health checks.
 - Credential defaults are allowed only in approved development/test environments.
-- Safe summaries may contain host, port, database, auth mode, batch size, and retry limits only.
+- `bronze_rejected_threshold` is a global Bronze policy with default `0`; an explicit non-negative environment value may override it for an approved environment.
+- `None` is not a valid configured Bronze threshold and must not mean unlimited rejected rows.
+- The effective Bronze threshold must be included in safe runtime summaries, table results, audit records, and publication decisions.
+- `retry_max_attempts` is the total number of attempts, including the initial attempt; default `3`, minimum `1`, maximum `3`.
+- Values above `3` are invalid and must fail Settings validation before health checks.
+- Safe summaries may contain host, port, database, auth mode, batch size, rejection thresholds, and retry limits only.
 
 ### W1 Definition of Done
 
@@ -153,6 +160,8 @@ Rules:
 - [x] Authentication and type validation have unit tests.
 - [x] Passwords do not appear in `repr`, logs, exception reports, or summaries.
 - [x] App and dependencies receive Settings through injection.
+- [x] Bronze rejection policy is centralized in Settings with default `0`, explicit override, and no implicit unlimited mode.
+- [x] Retry policy is centralized with default `3`, hard maximum `3`, and explicit total-attempt semantics.
 
 ## 6. W2 - Domain ownership and TableSpec
 
@@ -278,7 +287,7 @@ Minimum status vocabulary: `SUCCESS`, `SUCCESS_WITH_REJECTIONS`, `PARTIAL_SUCCES
 | 3.3 | Create audit model/service contract | Run/table/batch, counts, attempts, timestamps, and errors are represented | Audit contract test | Done |
 | 3.4 | Create `StagingManager` contract | Identifiers are validated; published tables are untouched before publish | Staging safety test | Done |
 | 3.5 | Create error classifier | Transient and deterministic errors are distinguished | Classifier matrix test | Done |
-| 3.6 | Create retry policy/executor contract | Maximum three attempts, backoff/jitter, injectable clock/sleeper | Retry behavior test | Done |
+| 3.6 | Create retry policy/executor contract | Maximum three total attempts, backoff/jitter, injectable clock/sleeper | Retry behavior test | Done |
 | 3.7 | Create checkpoint contract | Checkpoint advances only after successful commit | Checkpoint ordering test | Done |
 | 3.8 | Create fake fixtures | Foundation tests run without a live database | Fixture smoke test | Done |
 
@@ -374,7 +383,7 @@ Update this table after each completed task. Do not set a task to `Done` without
 |---|---|---|---|---|---|
 | 2026-09-04 | Create English execution document | `docs/ToDoCheckList/Phase_4_Review&Enhance_Code/phase4a_foundation_execution.md` | Markdown review | Created | Done |
 | 2026-09-04 | Execute W0 baseline/API compatibility | `tests/test_phase4a_w0_contract.py`, `main.py`, `src/app/app.py`, Sales Bronze job | `python -m pytest tests/test_phase4a_w0_contract.py -q` | 3 passed; baseline suite 31 passed, 3 blocked by unavailable PostgreSQL | Done |
-| 2026-09-04 | Execute W1 centralized configuration | `src/core/settings.py`, connectors, App, `.env.example`, `tests/test_settings.py` | `python -m pytest tests/test_settings.py -q` | 7 passed | Done |
+| 2026-09-04 | Execute W1 centralized configuration | `src/core/settings.py`, connectors, App, `.env.example`, `tests/test_settings.py` | `python -m pytest tests/test_settings.py -q` | 8 passed including Bronze threshold default, override, validation, and safe-summary evidence | Done |
 | 2026-09-04 | Execute W2 domain ownership and TableSpec | Domain jobs, shared runner, `tests/test_phase4a_w2_domain_ownership.py` | `python -m pytest tests/test_phase4a_w2_domain_ownership.py -q` | 4 passed | Done |
 | 2026-09-04 | Execute W3 foundation models/services | Shared ingestion models/services and W3 tests | `python -m pytest tests/test_ingestion_models.py tests/test_retry_policy.py tests/test_staging_manager.py tests/test_checkpoint_manager.py tests/test_audit_service.py -q` | 10 passed | Done |
 | 2026-09-04 | Run Phase 4A foundation suite | W0-W3 foundation tests | `python -m pytest tests/test_settings.py tests/test_phase4a_w0_contract.py tests/test_phase4a_w2_domain_ownership.py tests/test_ingestion_models.py tests/test_retry_policy.py tests/test_staging_manager.py tests/test_checkpoint_manager.py tests/test_audit_service.py -q` | 24 passed | Done |

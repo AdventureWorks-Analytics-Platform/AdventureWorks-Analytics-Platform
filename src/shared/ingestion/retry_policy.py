@@ -41,6 +41,8 @@ class RetryPolicy:
     def __post_init__(self):
         if self.max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
+        if self.max_attempts > 3:
+            raise ValueError("max_attempts cannot exceed 3 total attempts")
         if self.initial_delay_seconds <= 0 or self.max_delay_seconds <= 0:
             raise ValueError("retry delays must be positive")
         if self.max_delay_seconds < self.initial_delay_seconds:

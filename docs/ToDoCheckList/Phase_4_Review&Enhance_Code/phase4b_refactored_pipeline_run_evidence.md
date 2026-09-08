@@ -42,7 +42,7 @@ Evidence types used below:
 | Warehouse | PostgreSQL `localhost:5432 / adventureworks_warehouse` |
 | Python environment | `.venv\\Scripts\\python.exe` |
 | Batch size | `10,000` in the recorded configuration |
-| Retry attempts | `3` in the recorded configuration |
+| Retry attempts | `3` total attempts in the recorded configuration; approved maximum is `3` |
 | Latest automated regression | `135 passed` |
 
 ## 3. End-to-end workflow

@@ -198,6 +198,8 @@ Do not implement Silver retry or publication changes before staging identity and
 
 ### 6.5 Staging, global deduplication, retry, and checkpoint
 
+Silver uses the shared retry policy: `retry_max_attempts` defaults to `3`, accepts only `1..3`, and counts the initial attempt. A transient chunk failure may retry with the same logical identity; deterministic transformation, schema, and validation errors are not retried.
+
 | ID | Task | Output | Acceptance criteria | Dependency | Status |
 |---|---|---|---|---|---|
 | 6.5.1 | Create run-specific Silver staging | Staging table/schema per run and table load | Published Silver is untouched while chunks are being processed | W3/6.1 | Done |

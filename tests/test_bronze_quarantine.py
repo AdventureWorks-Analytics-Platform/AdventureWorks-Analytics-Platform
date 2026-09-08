@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 
+from src.core.settings import Settings
 from src.features.Sales_Performance.domain.bronze.bronze_validator import BronzeValidator
 from src.shared.ingestion.domain_bronze_job import DomainBronzeJob
 from src.shared.ingestion.ingestion_models import ExecutionIdentity, ExtractionBatch, TableSpec
@@ -67,7 +68,7 @@ class _Loader:
         return len(dataframe), True
 
 
-def _runtime_job(frame, quarantine, threshold=None):
+def _runtime_job(frame, quarantine, threshold=None, settings=None):
     spec = TableSpec("Sales", "Customer", "bronze", "customer", "ID", ("ID",), "ID")
     loader = _Loader()
     job = DomainBronzeJob(
@@ -80,6 +81,7 @@ def _runtime_job(frame, quarantine, threshold=None):
         staging_manager=StagingManager(),
         quarantine_service=quarantine,
         rejected_threshold=threshold,
+        settings=settings,
         sleeper=lambda _: None,
     )
     return job, loader
@@ -107,6 +109,58 @@ def test_domain_job_loads_valid_rows_and_records_rejected_rows():
     assert len(loader.loaded) == 1
     assert loader.loaded[0]["ID"].tolist() == [1.0]
     assert quarantine.count_for_load(result["load_id"]) == 1
+
+
+def test_domain_job_default_threshold_zero_fails_and_does_not_publish():
+    frame = pd.DataFrame(
+        {
+            "ID": [1, None],
+            "_source_system": ["sqlserver", "sqlserver"],
+            "_source_table": ["Sales.Customer", "Sales.Customer"],
+            "_load_date": ["2026-09-04", "2026-09-04"],
+            "_record_hash": ["hash-1", "hash-2"],
+        }
+    )
+    quarantine = QuarantineService()
+    job, loader = _runtime_job(frame, quarantine)
+
+    result = job.run()["customer"]
+
+    assert job.rejected_threshold == 0
+    assert result["status"] == "FAILED"
+    assert result["rejected_threshold"] == 0
+    assert result["published"] is False
+    assert loader.loaded == []
+    assert quarantine.count_for_load(result["load_id"]) == 1
+
+
+def test_domain_job_uses_settings_threshold_override():
+    frame = pd.DataFrame(
+        {
+            "ID": [1, None],
+            "_source_system": ["sqlserver", "sqlserver"],
+            "_source_table": ["Sales.Customer", "Sales.Customer"],
+            "_load_date": ["2026-09-04", "2026-09-04"],
+            "_record_hash": ["hash-1", "hash-2"],
+        }
+    )
+    settings = Settings(
+        sql_server_host="sql-host",
+        postgres_username="warehouse-user",
+        postgres_password="warehouse-secret",
+        bronze_rejected_threshold=1,
+        _env_file=None,
+    )
+    quarantine = QuarantineService()
+    job, loader = _runtime_job(frame, quarantine, settings=settings)
+
+    result = job.run()["customer"]
+
+    assert job.rejected_threshold == 1
+    assert result["status"] == "SUCCESS_WITH_REJECTIONS"
+    assert result["rejected_threshold"] == 1
+    assert result["published"] is True
+    assert len(loader.loaded) == 1
 
 
 def test_domain_job_schema_error_fails_closed_without_quarantine():

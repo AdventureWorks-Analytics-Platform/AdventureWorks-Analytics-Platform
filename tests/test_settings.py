@@ -19,6 +19,8 @@ def test_settings_parse_types_and_keep_password_out_of_safe_summary():
     settings = make_settings(batch_size="5000", debug="true")
 
     assert settings.batch_size == 5000
+    assert settings.bronze_rejected_threshold == 0
+    assert settings.safe_summary()["bronze_rejected_threshold"] == 0
     assert settings.debug is True
     assert "warehouse-secret" not in repr(settings)
     assert "warehouse-secret" not in str(settings.safe_summary())
@@ -26,6 +28,7 @@ def test_settings_parse_types_and_keep_password_out_of_safe_summary():
 
 def test_settings_environment_override(monkeypatch):
     monkeypatch.setenv("BATCH_SIZE", "2500")
+    monkeypatch.setenv("BRONZE_REJECTED_THRESHOLD", "7")
     monkeypatch.setenv("POSTGRES_PASSWORD", "environment-secret")
 
     settings = Settings(
@@ -35,7 +38,13 @@ def test_settings_environment_override(monkeypatch):
     )
 
     assert settings.batch_size == 2500
+    assert settings.bronze_rejected_threshold == 7
     assert settings.postgres_password.get_secret_value() == "environment-secret"
+
+
+def test_negative_bronze_rejected_threshold_is_rejected():
+    with pytest.raises(ValidationError, match="bronze_rejected_threshold"):
+        make_settings(bronze_rejected_threshold=-1)
 
 
 def test_sql_auth_requires_credentials():
@@ -66,6 +75,19 @@ def test_retry_max_delay_cannot_be_less_than_initial_delay():
             retry_initial_delay_seconds=10,
             retry_max_delay_seconds=5,
         )
+
+
+@pytest.mark.parametrize("attempts", [1, 2, 3])
+def test_retry_max_attempts_accepts_one_to_three_total_attempts(attempts):
+    settings = make_settings(retry_max_attempts=attempts)
+
+    assert settings.retry_max_attempts == attempts
+
+
+@pytest.mark.parametrize("attempts", [0, 4, 10])
+def test_retry_max_attempts_rejects_values_outside_one_to_three(attempts):
+    with pytest.raises(ValidationError, match="retry_max_attempts"):
+        make_settings(retry_max_attempts=attempts)
 
 
 def test_connectors_use_injected_settings():

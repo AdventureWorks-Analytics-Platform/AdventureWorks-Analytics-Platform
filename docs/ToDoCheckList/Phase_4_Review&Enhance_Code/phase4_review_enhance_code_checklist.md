@@ -29,7 +29,7 @@
 |---|---|---|---|
 | Application orchestration | `PipelineRunner` executes Settings/health, bootstrap/readiness, Bronze/Silver, Silver gate through Gold, and returns a structured dictionary; CLI provides exit/report delivery | Full runtime path and delivery boundary are implemented | Preserve contract while adding future scheduler integrations |
 | Bootstrap | `PlatformBootstrapJob.run()` owns idempotent metadata bootstrap and schema-version readiness | Required inventory/version must remain aligned with migrations | Keep bootstrap non-destructive and version-compatible |
-| Bronze ingestion | Domain jobs use shared batching, staging, audit, quarantine, retry, reconciliation, checkpoint, and publish services | Bronze rejection threshold is not wired from Settings; mode/threshold policy still needs an explicit contract test | Wire `bronze_rejected_threshold=0` (or record an approved policy) and close remaining contract gaps |
+| Bronze ingestion | Domain jobs use shared batching, staging, audit, quarantine, retry, reconciliation, checkpoint, and publish services | Global Bronze threshold is centralized in Settings with default `0`; explicit non-negative override is supported | Preserve the shared policy and extend domain-specific overrides only through approved configuration |
 | Silver transformation | Injectable job reads chunks, validates/quarantines, stages, globally deduplicates, validates, and publishes a versioned candidate | Global dedup currently concatenates all transformed chunks in memory; legacy default writer still has direct `if_exists="replace"` | Move global dedup/publish fully behind database staging and retire unsafe fallback |
 | Gold loading | Injectable `SalesGoldJob` owns batch fact build, validation, constraints, KPI, audit, versioned publication, and pointer update | Retry/reconciliation safety is adapter-dependent and should have explicit production integration evidence | Keep Gold mechanics in the job; verify adapter transaction/idempotency guarantees |
 | Validation | Silver and Gold gates are enforced by `PipelineRunner` and Gold job | Full-run `PARTIAL_SUCCESS` is correctly non-zero at CLI, but legacy `App.run()` maps it to external `ok` | Decide whether the compatibility API should expose a non-success status too |
@@ -45,7 +45,7 @@
 | Area | Verified status | Evidence / remaining action |
 |---|---|---|
 | Foundation and configuration | Implemented | `src/core/settings.py`, injected connectors, Settings tests, and Phase 4A evidence. Defaults are intentionally local-only for development/test; production password validation is covered. |
-| Bronze foundation and reliability | Implemented with one policy gap | Shared batch/staging/audit/quarantine/retry/checkpoint/reconciliation/publish path and domain ownership are present. `bronze_rejected_threshold` is not a Settings field and domain jobs pass `None`, so the required default-zero policy is not enforced. |
+| Bronze foundation and reliability | Implemented | Shared batch/staging/audit/quarantine/retry/checkpoint/reconciliation/publish path is present. Global `bronze_rejected_threshold` defaults to `0`, supports explicit non-negative override, is injected through the shared job, and is covered by focused tests. |
 | Silver transformation and gate | Implemented with migration gaps | Chunked reads, contracts, quarantine, staging, global dedup, validation, and candidate publication are present. Global dedup still materializes all transformed chunks, and the legacy default writer retains direct replacement. |
 | Gold loading and publication | Implemented | Gold job owns fact batches, validation, constraints, KPI, candidate publication, and pointer update. Adapter-level transaction/reconciliation evidence remains the production integration boundary. |
 | Orchestration, CLI, and reports | Implemented | Runner, readiness gates, stage selection, report rendering, and exit-code tests are present. `App.run()` retains a compatibility mapping that turns `PARTIAL_SUCCESS` into `ok`; CLI mapping remains non-zero. |
@@ -116,7 +116,8 @@ class Settings(BaseSettings):
 	postgres_password: SecretStr
 
 	batch_size: int = Field(default=10000, gt=0)
-	retry_max_attempts: int = Field(default=3, ge=1, le=10)
+	bronze_rejected_threshold: int = Field(default=0, ge=0)
+	retry_max_attempts: int = Field(default=3, ge=1, le=3)
 	retry_initial_delay_seconds: float = Field(default=1.0, gt=0)
 	retry_max_delay_seconds: float = Field(default=30.0, gt=0)
 
@@ -181,7 +182,7 @@ class PostgreSQLConnector(BaseConnector):
 
 For backward-compatible construction during migration, constructors may temporarily use `settings: Settings | None = None` and resolve `get_settings()` internally. New application code should always inject the object explicitly. The legacy independent `os.getenv()` reads should be removed after migration.
 
-The `.env.example` file must document the selected names, including `SQL_SERVER_AUTH_MODE`, `BATCH_SIZE`, and retry settings. The real `.env` remains local-only and is protected by `.gitignore`.
+The `.env.example` file must document the selected names, including `SQL_SERVER_AUTH_MODE`, `BATCH_SIZE`, `BRONZE_REJECTED_THRESHOLD`, and retry settings. The real `.env` remains local-only and is protected by `.gitignore`.
 
 Required configuration tests:
 
@@ -443,7 +444,7 @@ Any implementation that drops published Gold before a successful build, writes d
 
 | Area | Current behavior | Assessment |
 |---|---|---|
-| Retry implementation | Shared `RetryPolicy`, transient classification, bounded backoff, attempt audit, and same-identity retry are implemented | `retry_max_attempts` permits `1..10`, while the approved Phase 4 baseline says maximum 3; policy must be reconciled |
+| Retry implementation | Shared `RetryPolicy`, transient classification, bounded backoff, attempt audit, and same-identity retry are implemented | Option 2 is implemented: `retry_max_attempts` is configurable from `1..3`, default `3`; the value counts total attempts including the initial attempt |
 | Bronze write identity | Bronze uses run/load/batch identity, staging, reconciliation, checkpoint, and publish boundaries | Rejection threshold is not wired from Settings, so the raw-load default-zero policy is not enforced |
 | Batch checkpoint | Checkpoint and committed-progress services persist logical batch progress after staging commit | Production integration evidence should continue to verify transaction atomicity and uncertain-commit reconciliation |
 | Duplicate protection | Deterministic batch/record identity and reconciliation protect retries; Silver/Gold use candidate publication boundaries | Silver global dedup remains memory-bound and the legacy direct-replace writer is still reachable |
@@ -478,7 +479,7 @@ The same retry must reuse the same `load_id` and `batch_id`; it must not generat
 | Retryable errors | Network timeout, connection reset, temporary database unavailability, deadlock, and explicitly classified transient errors |
 | Non-retryable errors | Missing table/column, authentication failure, invalid SQL, schema mismatch, data contract failure, and deterministic validation failure |
 | Backoff | Exponential backoff with jitter, for example 1s, 2s, 4s, then a bounded maximum |
-| Attempt limit | Small fixed maximum such as 3 attempts; configurable per environment |
+| Attempt limit | **Approved Option 2:** configurable per environment from `1..3`, default `3`; `max_attempts` counts the initial attempt plus retries |
 | Transaction boundary | Retry the complete atomic unit; never blindly retry part of a transaction after an uncertain commit |
 | Observability | Log attempt number, run/load/batch IDs, error class, wait time, and final outcome without secrets or full row payloads |
 | Stop policy | Exhausted retries mark the batch/table/stage failed and prevent publication when the stage is required |
@@ -612,10 +613,11 @@ Any implementation that creates one monolithic platform Bronze job, duplicates b
 | [x] | Bootstrap and migrations | Add schema versioning | Record and validate database schema version | P1 | Done | Initialization was not version-aware | Schema compatibility is traceable | Version/readiness contract and tests |
 | [x] | Bronze reliability | Validate job mode strictly | Reject unsupported modes instead of treating every non-`full` value as append | P0 | Done | Invalid mode handling was previously permissive | Invalid requests fail before mutation | Bronze/CLI contract tests |
 | [x] | Bronze reliability | Isolate table failures | Produce a result for each table and apply an explicit stop/continue policy | P1 | Done | Table failures lacked complete reports | Operators see attempted tables and failures | Domain job results and audit tests |
-| [x] | Bronze reliability | Add retries and backoff | Retry transient source/target connection and load failures | P1 | Done, policy reconciliation pending | Temporary failures were not retried | Same logical batch can retry safely | Retry/reconciliation tests; reconcile max-attempt policy |
+| [x] | Bronze reliability | Enforce unified retry attempt policy | Use `retry_max_attempts` default `3`, valid range `1..3`, with total-attempt semantics across Bronze/Silver/Gold | P1 | Done | Settings and shared RetryPolicy now enforce the approved bound | Predictable bounded retries with consistent behavior | Settings, RetryPolicy, Bronze/Silver/Gold job tests and focused evidence |
 | [x] | Bronze reliability | Add run audit metadata | Persist run ID, timestamps, mode, table, counts, status, and error | P1 | Done | Durable operational history was absent | Load history and lineage are queryable | Audit and persistent quarantine tests |
 | [x] | Bronze reliability | Make incremental loads idempotent | Define watermark or hash strategy and prevent duplicate append rows | P1 | Done | Append reruns could duplicate rows | Checkpoint/reconciliation protects reruns | Bronze resume/retry/rerun tests |
 | [x] | Bronze quality | Use complete Bronze validation | Invoke lineage, critical-column, null-tolerance, and count checks in the job | P1 | Done | Validation existed but was not previously wired through the job | Data quality failures are caught before transformation/publication | `validate_staging()` report is persisted in the table result and audit path | Validation contract |
+| [x] | Bronze quality | Centralize rejected-row threshold policy | Add global `bronze_rejected_threshold` with default `0`, explicit non-negative override, and no unlimited `None` path | P1 | Done | Domain jobs previously left threshold unset | Rejection handling is deterministic across Sales, Production, and Person | Settings, shared job, `.env.example`, and focused tests |
 | [x] | Silver transformation | Encapsulate Silver script as a job/service | Move orchestration responsibilities from standalone `run()` into a reusable class | P0 | Done | Silver cannot be dependency-injected or controlled consistently | Silver can run from CLI, App, tests, or scheduler | Job accepts dependencies/configuration and returns standard result | Pipeline contract |
 | [x] | Silver transformation | Define transformation contracts | Validate required input columns and output schema before writing | P1 | Done | Missing columns fail late with low-context errors | Schema drift is detected early | Contract failures identify table and missing columns | Silver job |
 | [x] | Silver quality | Make validation a gate | Return non-zero/failure status when duplicate, null, row-loss, or orphan checks fail | P0 | Done | Validation reports can be generated without preventing downstream publication | Invalid Silver data cannot silently feed Gold | Pipeline stops before Gold when Silver validation fails | Silver validation service |
@@ -666,5 +668,7 @@ Any implementation that creates one monolithic platform Bronze job, duplicates b
 |---|---|---|---|
 | 2026-09-08 | Branch and worktree review | `main` at `9417393`; worktree has a pre-existing deletion of `docs/project/PHASE_4A_FOUNDATION_EXECUTION_VI.md` | Git branch/status review |
 | 2026-09-08 | Customer/person enrichment decision | Approved conditional policy: individual customers use `Person` name; store customers use `AccountNumber`; unresolved individual Person references fail closed. Implementation and tests remain pending | Phase 4C/4D updates and Silver acceptance criteria |
+| 2026-09-08 | Bronze rejection threshold decision and implementation | Option 2 implemented: centralized global `bronze_rejected_threshold`, default `0`, explicit non-negative override; `None` resolves to Settings and never means unlimited rejected rows | `src/core/settings.py`, `DomainBronzeJob`, `.env.example`, `tests/test_settings.py`, `tests/test_bronze_quarantine.py`; focused policy suite `15 passed` |
+| 2026-09-08 | Retry policy decision and implementation | Option 2 implemented: `retry_max_attempts` defaults to `3`, is configurable only from `1..3`, and counts the initial attempt; values above `3` are invalid | `src/core/settings.py`, `src/shared/ingestion/retry_policy.py`, `tests/test_settings.py`, `tests/test_retry_policy.py`; focused policy suite `22 passed`, shared job suite `33 passed` |
 | 2026-09-08 | Focused contract validation | `24 passed` | `tests/test_settings.py`, `tests/test_pipeline_runner.py`, `tests/test_pipeline_cli.py` using `.venv` |
 | 2026-09-07 | Phase 4E delivery evidence | Unit lane `182 passed, 22 deselected`; focused Phase 4E `25 passed`; full regression `204 passed`; integration lane `22 passed`; CLI help, compile, and diff checks pass | `docs/project/PHASE_4E_EVIDENCE.md`, `.github/workflows/ci.yml` |

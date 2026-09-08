@@ -297,6 +297,8 @@ Do not keep the destructive Gold flow in the canonical path. Do not add retry be
 
 ### 6.6 Atomic publication and retry safety
 
+Gold uses the same shared retry policy: `retry_max_attempts` defaults to `3`, accepts only `1..3`, and counts the initial attempt. Candidate publication retries must preserve run/table/batch identity and reconcile uncertain commits before another attempt.
+
 | ID | Task | Output | Acceptance criteria | Dependency | Status |
 |---|---|---|---|---|---|
 | 6.6.1 | Create candidate schema identity | Gold staging/version manager integration | Published Gold is untouched during build; `gold_version` and identifiers are validated and safe for SQL | W3/6.1 | Done |

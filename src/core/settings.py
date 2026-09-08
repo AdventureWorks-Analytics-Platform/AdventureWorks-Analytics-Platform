@@ -32,9 +32,10 @@ class Settings(BaseSettings):
     postgres_password: SecretStr = SecretStr("postgres")
 
     batch_size: int = Field(default=10000, gt=0)
+    bronze_rejected_threshold: int = Field(default=0, ge=0)
     silver_rejected_threshold: int = Field(default=0, ge=0)
     silver_transform_version: str = "silver-v1"
-    retry_max_attempts: int = Field(default=3, ge=1, le=10)
+    retry_max_attempts: int = Field(default=3, ge=1, le=3)
     retry_initial_delay_seconds: float = Field(default=1.0, gt=0)
     retry_max_delay_seconds: float = Field(default=30.0, gt=0)
     bronze_query_timeout_seconds: int = Field(default=300, gt=0)
@@ -87,6 +88,7 @@ class Settings(BaseSettings):
             "postgres_port": self.postgres_port,
             "postgres_database": self.postgres_database,
             "batch_size": self.batch_size,
+            "bronze_rejected_threshold": self.bronze_rejected_threshold,
             "silver_rejected_threshold": self.silver_rejected_threshold,
             "silver_transform_version": self.silver_transform_version,
             "retry_max_attempts": self.retry_max_attempts,

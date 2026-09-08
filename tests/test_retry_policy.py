@@ -61,3 +61,29 @@ def test_retry_exhaustion_raises_after_max_attempts():
         execute_with_retry(operation, RetryPolicy(max_attempts=3), lambda _: None)
 
     assert len(attempts) == 3
+
+
+@pytest.mark.parametrize("max_attempts", [0, 4, 10])
+def test_retry_policy_rejects_values_outside_one_to_three(max_attempts):
+    with pytest.raises(ValueError, match="max_attempts"):
+        RetryPolicy(max_attempts=max_attempts)
+
+
+def test_retry_max_attempts_counts_initial_attempt_and_retries():
+    attempts = []
+    retry_events = []
+
+    def operation():
+        attempts.append(len(attempts) + 1)
+        raise TimeoutError("temporary timeout")
+
+    with pytest.raises(TimeoutError):
+        execute_with_retry(
+            operation,
+            RetryPolicy(max_attempts=2, initial_delay_seconds=0.01),
+            lambda _: None,
+            on_retry=lambda attempt, delay, error: retry_events.append(attempt),
+        )
+
+    assert attempts == [1, 2]
+    assert retry_events == [1]

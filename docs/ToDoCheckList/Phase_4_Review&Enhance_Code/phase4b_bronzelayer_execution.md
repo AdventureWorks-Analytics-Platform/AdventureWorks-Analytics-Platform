@@ -431,7 +431,36 @@ Do not quarantine:
 - Invalid query or contract failure.
 - A failure that prevents safe identification of the record boundary.
 
-### 3.4. Full-table validation and publish impact
+### 3.4. Approved rejected-row threshold policy
+
+The approved policy is a **global configurable threshold with a strict default of zero**:
+
+| Rule | Decision |
+|---|---|
+| Setting | `bronze_rejected_threshold: int` |
+| Environment variable | `BRONZE_REJECTED_THRESHOLD` |
+| Default | `0` in every environment unless an explicit approved override is supplied |
+| Scope | One effective threshold applies to each Bronze table load; rejected rows are counted cumulatively across all batches of that table |
+| Threshold `0` | Any rejected row makes the table load `FAILED`; staging is not published; the previous valid Bronze target remains active |
+| Threshold `N > 0` | A rejected count up to `N` may publish as `SUCCESS_WITH_REJECTIONS`; a count above `N` fails the table load |
+| `None` | Not a valid configured policy; it must never mean unlimited rejected rows |
+| Override | Allowed only through the centralized `Settings` object; domain jobs must not silently choose their own default |
+| Evidence | Effective threshold is present in the table result, audit record, quarantine context, and publish decision |
+
+The threshold is a publication policy, not a quarantine switch. Isolatable rejected rows are still persisted through the quarantine contract. System, schema, authentication, contract, and deterministic validation errors remain fail-closed regardless of the threshold.
+
+Required acceptance tests before marking this policy implemented:
+
+1. Settings defaults `bronze_rejected_threshold` to `0`.
+2. Process environment `BRONZE_REJECTED_THRESHOLD` overrides the default.
+3. Negative values fail Settings validation.
+4. One rejected row with threshold `0` produces `FAILED` and no Bronze publish.
+5. Rejected rows within an explicit positive threshold produce `SUCCESS_WITH_REJECTIONS`.
+6. Rejected rows above the threshold produce `FAILED` and preserve the previous Bronze target.
+7. Sales, Production, and Person domain jobs use the same injected effective threshold.
+8. Results and audit records expose the effective threshold; no path treats `None` as unlimited.
+
+### 3.5. Full-table validation and publish impact
 
 Affected files/symbols:
 
@@ -462,7 +491,37 @@ source batches
 
 Published Bronze must not be dropped or replaced before all staging data passes validation.
 
-### 3.5. Retry, idempotency, and reconciliation impact
+### 3.6. Approved retry-attempt policy
+
+The approved retry policy is **configurable within a hard maximum of three total attempts**:
+
+| Rule | Decision |
+|---|---|
+| Setting | `retry_max_attempts: int` |
+| Environment variable | `RETRY_MAX_ATTEMPTS` |
+| Default | `3` total attempts |
+| Valid range | `1..3` total attempts; values above `3` fail configuration validation |
+| Attempt meaning | Attempt `1` is the initial operation; attempts `2` and `3` are retries |
+| Retryable errors | Classified transient errors only |
+| Non-retryable errors | Schema, authentication, contract, invalid SQL, deterministic validation, and business-rule errors |
+| Identity | Every attempt reuses the same `run_id`, `load_id`, and `batch_id` |
+| Backoff | Bounded exponential backoff with jitter, subject to batch/table timeout limits |
+| Unknown commit | Reconcile staging/audit/idempotency state before retrying |
+| Exhaustion | Final outcome is `FAILED`; no publication occurs |
+
+The three-attempt limit is a safety boundary. Environment configuration may reduce the limit to `1` or `2`, but may not increase it. This policy must be applied consistently to Bronze, Silver, and Gold shared retry integrations.
+
+Required acceptance tests:
+
+1. `retry_max_attempts=1`, `2`, and `3` are valid.
+2. `retry_max_attempts=0` and `4` are invalid; `10` is invalid.
+3. A transient error succeeds on attempt `2` when the limit is `3`.
+4. A transient error fails after exactly `3` total attempts when all attempts fail.
+5. A deterministic error executes once and is not retried.
+6. Retry attempts preserve the same logical batch identity.
+7. Retry audit records include attempt number, delay, error class, and final outcome.
+
+### 3.7. Retry, idempotency, and reconciliation impact
 
 Affected files/symbols:
 
@@ -473,6 +532,7 @@ Affected files/symbols:
 
 Mandatory rules:
 
+- `retry_max_attempts` counts total attempts including the initial operation; the effective range is `1..3` and the default is `3`.
 - Retry transient errors only.
 - Preserve `run_id`, `load_id`, and `batch_id` across all attempts.
 - Retry one atomic batch; never blindly retry a partial write.
@@ -480,7 +540,7 @@ Mandatory rules:
 - If commit outcome is unknown, query audit/staging/idempotency keys and reconcile before retrying.
 - Retry exhaustion must return `FAILED` and must not publish staging.
 
-### 3.6. Test and operational impact
+### 3.8. Test and operational impact
 
 Add database-independent unit tests for mechanics and database-backed integration tests for transaction and publish behavior.
 
@@ -545,6 +605,8 @@ Current W4.2 implementation evidence:
 | 4.3.3 | Classify errors | Row/system/schema error policy | System/schema errors fail closed | Done |
 | 4.3.4 | Add threshold | `BronzeValidator.validate_table()` rejection threshold | Threshold exceeded means validation `FAILED`, with no publish | Done |
 | 4.3.5 | Test quarantine/redaction | `tests/test_bronze_quarantine.py` | No full payload in logs; reason is queryable | Done |
+| 4.3.6 | Wire centralized threshold policy | `Settings.bronze_rejected_threshold` and `DomainBronzeJob` default resolution | Default is `0`; explicit non-negative override is supported; `None` never means unlimited | Done |
+| 4.3.7 | Test centralized threshold policy | Settings, domain-job, publish-preservation, and audit tests | Default, override, negative-value rejection, threshold status, and all-domain injection are verified | Done |
 
 ### W4.4 - Full-table validation and publish
 
@@ -577,6 +639,8 @@ Current W4.4 implementation evidence:
 | 4.5.4 | Reconcile unknown commit | `ReconciliationService` | No blind append after timeout/unknown commit | Done |
 | 4.5.5 | Protect against duplicates | Content-hash-aware `StagingManager.write_batch()` | Rerunning the same input creates no duplicates | Done |
 | 4.5.6 | Test exhaustion/rerun | `tests/test_bronze_retry.py` and retry contract tests | Exhaustion means `FAILED`, with no publish | Done |
+| 4.5.7 | Enforce retry attempt policy | `Settings.retry_max_attempts` and shared `RetryPolicy` | Default is 3 total attempts; valid range is 1..3; values above 3 fail configuration validation | Done |
+| 4.5.8 | Test total-attempt semantics | Settings and retry executor tests | Attempt 1 is initial execution; max 3 means at most 2 retries; deterministic errors execute once | Done |
 
 Current W4.5 implementation evidence:
 
@@ -728,6 +792,8 @@ Remaining production gates: none for the listed Phase 4B production gates; READM
 | 2026-09-04 | Complete log-redaction integration evidence and README update | `redact_log_message()`, PostgreSQL/SQL Server connector error logging, `tests/test_log_redaction.py`, `README.md` | `python -m pytest tests/test_log_redaction.py tests/test_settings.py -q` | 9 passed | Done |
 | 2026-09-04 | Run refactored pipeline from settings through current Sales Bronze | `main.py` -> `App` -> health -> bootstrap -> `SalesBronzeIngestionJob` | SQL Server/PostgreSQL runtime execution | Health/bootstrap `ok`; 5 Bronze tables `SUCCESS`, validation/publish `true`; 162,629 source/target rows matched | Done |
 | 2026-09-04 | Re-run full regression after end-to-end pipeline | All repository tests | `python -m pytest -q` | 90 passed | Done |
+| 2026-09-08 | Enforce unified retry attempt policy | `Settings.retry_max_attempts`, `RetryPolicy`, Bronze/Silver/Gold integrations, retry/settings tests | `python -m pytest tests/test_settings.py tests/test_retry_policy.py -q`; `python -m pytest tests/test_bronze_ingestion_job.py tests/test_bronze_retry.py tests/test_silver_job.py tests/test_gold_retry.py -q` | Policy suite `22 passed`; shared job suite `33 passed`; total attempts are bounded to `1..3` | Done |
+| 2026-09-08 | Wire centralized Bronze rejection threshold policy | `Settings.bronze_rejected_threshold`, `DomainBronzeJob`, `.env.example`, Settings and quarantine tests | `python -m pytest tests/test_settings.py tests/test_bronze_quarantine.py tests/test_bronze_ingestion_job.py tests/test_bronze_publish.py tests/test_bronze_retry.py tests/test_transactional_checkpoint.py -q`; direct three-domain injection check; `python -m pytest -q` | Focused Bronze/Settings suite `31 passed`; Sales/Production/Person all resolved injected threshold `7`; full regression `210 passed` | Done |
 
 ## 11. Related documents
 

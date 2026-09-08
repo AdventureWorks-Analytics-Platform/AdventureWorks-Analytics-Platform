@@ -68,7 +68,13 @@ class DomainBronzeJob:
         self.checkpoint_manager = checkpoint_manager
         self.staging_reader = staging_reader or getattr(self.loader, "read_staging", None)
         self.quarantine_service = quarantine_service or QuarantineService()
-        self.rejected_threshold = rejected_threshold
+        self.rejected_threshold = (
+            self.settings.bronze_rejected_threshold
+            if rejected_threshold is None
+            else rejected_threshold
+        )
+        if self.rejected_threshold < 0:
+            raise ValueError("rejected_threshold cannot be negative")
 
     def run(
         self,
@@ -433,6 +439,7 @@ class DomainBronzeJob:
                     "target_count": rows_written,
                     "validation_passed": validation_ok,
                     "validation_report": validation_report,
+                    "rejected_threshold": self.rejected_threshold,
                     "staging_name": staging.name,
                     "published": (
                         self.staging_manager.published_staging(spec.target_table)
