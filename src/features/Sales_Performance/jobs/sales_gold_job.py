@@ -43,7 +43,8 @@ GOLD_SQL_TYPES = {
     "date_id": "INTEGER", "full_date": "DATE", "year_number": "SMALLINT",
     "quarter_number": "SMALLINT", "month_number": "SMALLINT", "month_name": "VARCHAR(20)",
     "day_number": "SMALLINT", "is_weekend": "BOOLEAN", "customer_id": "INTEGER",
-    "customer_name": "VARCHAR(255)", "person_id": "INTEGER", "store_id": "INTEGER",
+    "customer_name": "VARCHAR(255)", "customer_type": "VARCHAR(20)",
+    "customer_name_source": "VARCHAR(20)", "person_id": "INTEGER", "store_id": "INTEGER",
     "territory_id": "INTEGER", "account_number": "VARCHAR(50)", "product_id": "INTEGER",
     "product_name": "VARCHAR(255)", "product_number": "VARCHAR(50)", "product_line": "VARCHAR(2)",
     "product_class": "VARCHAR(2)", "product_style": "VARCHAR(2)", "list_price": "NUMERIC(19,4)",
@@ -689,9 +690,13 @@ GOLD_TABLE_SPECS = (
     ),
     GoldTableSpec(
         "customer_clean", "dim_customer", "customer_id",
-        ("customer_id", "customer_name", "person_id", "store_id", "territory_id", "account_number"),
+        (
+            "customer_id", "customer_name", "customer_type", "customer_name_source",
+            "person_id", "store_id", "territory_id", "account_number",
+        ),
         expected_types={
-            "customer_id": "integer", "customer_name": "string", "person_id": "integer",
+            "customer_id": "integer", "customer_name": "string", "customer_type": "string",
+            "customer_name_source": "string", "person_id": "integer",
             "store_id": "integer", "territory_id": "integer", "account_number": "string",
         },
     ),

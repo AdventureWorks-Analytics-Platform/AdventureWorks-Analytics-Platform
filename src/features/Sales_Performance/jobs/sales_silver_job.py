@@ -142,6 +142,8 @@ SALES_SILVER_TABLE_SPECS = (
             "territory_id",
             "account_number",
             "customer_name",
+            "customer_type",
+            "customer_name_source",
         ),
         "customer_id",
     ),
@@ -376,7 +378,7 @@ class SilverTransformationJob:
     ) -> pd.DataFrame:
         from scripts.transformation.silver.sales_silver_clean import CLEANERS
 
-        if source_table == "sales_person":
+        if source_table in {"customer", "sales_person"}:
             return CLEANERS[source_table](bronze_frame, person_frame)
         return CLEANERS[source_table](bronze_frame)
 
@@ -774,7 +776,10 @@ class SilverTransformationJob:
             )
 
     def _validate_required_dependencies(self) -> None:
-        if "sales_person" not in self.dependency_order:
+        if not any(
+            source_table in {"customer", "sales_person"}
+            for source_table in self.dependency_order
+        ):
             return
         if not any(spec.source_table == "sales_person" for spec in self.table_specs):
             raise RuntimeError(
@@ -783,14 +788,20 @@ class SilverTransformationJob:
 
     def _load_required_dependency_frames(self) -> dict[str, pd.DataFrame]:
         frames: dict[str, pd.DataFrame] = {}
-        for dependency_name in ["bronze.person"]:
-            try:
-                frames[dependency_name] = self.reader("person", self.settings)
-            except Exception as exc:  # pragma: no cover - exercised via explicit regression test
+        requires_person_for_salesperson = "sales_person" in self.dependency_order
+        requires_person_for_customer = "customer" in self.dependency_order
+        if not (requires_person_for_salesperson or requires_person_for_customer):
+            return frames
+        try:
+            frames["bronze.person"] = self.reader("person", self.settings)
+        except Exception as exc:  # noqa: BLE001 - resolved by customer row policy
+            if requires_person_for_salesperson:
                 raise RuntimeError(
-                    "Required dependency 'bronze.person' for Silver table 'sales_person' "
-                    f"could not be loaded ({exc})."
+                    "Required dependency 'bronze.person' for sales_person "
+                    "transformation could not be loaded "
+                    f"({exc})."
                 ) from exc
+            frames["bronze.person"] = None
         return frames
 
     def run(

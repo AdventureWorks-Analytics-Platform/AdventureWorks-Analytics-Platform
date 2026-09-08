@@ -78,6 +78,8 @@ class TestBuildDimensions:
         customers = pd.DataFrame({
             "customer_id": [1, 1, 2],
             "customer_name": ["ABC Corp", "ABC Corp", "XYZ Inc"],
+            "customer_type": ["STORE", "STORE", "INDIVIDUAL"],
+            "customer_name_source": ["ACCOUNT", "ACCOUNT", "PERSON"],
             "person_id": [None, None, 100],
             "store_id": [None, None, 10],
             "territory_id": [1, 1, 2],
@@ -116,6 +118,8 @@ class TestBuildDimensions:
         customers = pd.DataFrame({
             "customer_id": [1, 1],
             "customer_name": ["Zeta", "Alpha"],
+            "customer_type": ["INDIVIDUAL", "INDIVIDUAL"],
+            "customer_name_source": ["PERSON", "PERSON"],
             "person_id": [2, 1],
             "store_id": [2, 1],
             "territory_id": [2, 1],
@@ -147,6 +151,8 @@ class TestBuildDimensions:
         customers = pd.DataFrame({
             "customer_id": [None],
             "customer_name": ["ABC Corp"],
+            "customer_type": ["STORE"],
+            "customer_name_source": ["ACCOUNT"],
             "person_id": [None],
             "store_id": [None],
             "territory_id": [1],

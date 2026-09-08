@@ -130,7 +130,9 @@ def clean_sales_order_detail(frame: pd.DataFrame) -> pd.DataFrame:
     ]).sort_values("sales_order_detail_id", kind="mergesort").reset_index(drop=True)
 
 
-def clean_customer(frame: pd.DataFrame) -> pd.DataFrame:
+def clean_customer(
+    frame: pd.DataFrame, person_frame: pd.DataFrame | None = None
+) -> pd.DataFrame:
     result = _rename_columns(
         frame,
         {
@@ -143,11 +145,63 @@ def clean_customer(frame: pd.DataFrame) -> pd.DataFrame:
             "_load_date": "_load_date",
         },
     )
+    individual_mask = result["person_id"].notna()
+    result["customer_type"] = individual_mask.map(
+        {True: "INDIVIDUAL", False: "STORE"}
+    )
     result["customer_name"] = result["account_number"].astype("string").str.strip()
+    result["customer_name_source"] = "ACCOUNT"
+
+    if individual_mask.any():
+        if person_frame is None:
+            raise RuntimeError(
+                "Missing required Bronze dependency 'bronze.person' for "
+                "individual customer enrichment."
+            )
+
+        person_clean = _rename_columns(
+            person_frame,
+            {
+                "BusinessEntityID": "person_id",
+                "FirstName": "first_name",
+                "LastName": "last_name",
+            },
+        )
+        required_person_columns = {"person_id", "first_name", "last_name"}
+        missing_person_columns = required_person_columns.difference(person_clean.columns)
+        if missing_person_columns:
+            missing = ", ".join(sorted(missing_person_columns))
+            raise RuntimeError(
+                "Missing required columns in Bronze dependency 'bronze.person': "
+                f"{missing}."
+            )
+
+        person_clean = person_clean[
+            ["person_id", "first_name", "last_name"]
+        ].drop_duplicates("person_id")
+        result = result.merge(person_clean, on="person_id", how="left")
+        unresolved = individual_mask & (
+            result["first_name"].isna() | result["last_name"].isna()
+        )
+        if unresolved.any():
+            unresolved_ids = result.loc[unresolved, "person_id"].tolist()
+            raise RuntimeError(
+                "Unresolved Person references for individual customers: "
+                f"{unresolved_ids}."
+            )
+        result.loc[individual_mask, "customer_name"] = (
+            result.loc[individual_mask, "first_name"].fillna("")
+            + " "
+            + result.loc[individual_mask, "last_name"].fillna("")
+        ).str.strip()
+        result.loc[individual_mask, "customer_name_source"] = "PERSON"
+        result = result.drop(columns=["first_name", "last_name"], errors="ignore")
+
     result = _deduplicate(result, "customer_id")
     return _select_columns(result, [
         "customer_id", "person_id", "store_id", "territory_id", "account_number",
-        "customer_name", "_source_system", "_load_date",
+        "customer_name", "customer_type", "customer_name_source",
+        "_source_system", "_load_date",
     ]).sort_values("customer_id", kind="mergesort").reset_index(drop=True)
 
 

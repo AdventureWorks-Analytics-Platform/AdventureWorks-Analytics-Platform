@@ -2,11 +2,63 @@ import pandas as pd
 import pytest
 
 from scripts.transformation.silver.sales_silver_clean import (
+    clean_customer,
     clean_product,
     clean_sales_person,
     clean_sales_order_detail,
     clean_sales_order_header,
 )
+
+
+def test_clean_customer_enriches_individuals_from_person():
+    customers = pd.DataFrame(
+        {
+            "CustomerID": [1], "PersonID": [101], "StoreID": [None],
+            "TerritoryID": [1], "AccountNumber": ["AW000001"],
+            "_source_system": ["AdventureWorks2012"], "_load_date": ["2026-09-08"],
+        }
+    )
+    people = pd.DataFrame(
+        {"BusinessEntityID": [101], "FirstName": ["Ada"], "LastName": ["Lovelace"]}
+    )
+
+    result = clean_customer(customers, people)
+
+    assert result.iloc[0]["customer_name"] == "Ada Lovelace"
+    assert result.iloc[0]["customer_type"] == "INDIVIDUAL"
+    assert result.iloc[0]["customer_name_source"] == "PERSON"
+
+
+def test_clean_customer_uses_account_number_for_store_customers():
+    customers = pd.DataFrame(
+        {
+            "CustomerID": [2], "PersonID": [None], "StoreID": [202],
+            "TerritoryID": [1], "AccountNumber": [" AW000202 "],
+            "_source_system": ["AdventureWorks2012"], "_load_date": ["2026-09-08"],
+        }
+    )
+
+    result = clean_customer(customers)
+
+    assert result.iloc[0]["customer_name"] == "AW000202"
+    assert result.iloc[0]["customer_type"] == "STORE"
+    assert result.iloc[0]["customer_name_source"] == "ACCOUNT"
+
+
+def test_clean_customer_fails_closed_for_unresolved_individual():
+    customers = pd.DataFrame(
+        {
+            "CustomerID": [3], "PersonID": [303], "StoreID": [None],
+            "TerritoryID": [1], "AccountNumber": ["AW000303"],
+            "_source_system": ["AdventureWorks2012"], "_load_date": ["2026-09-08"],
+        }
+    )
+    people = pd.DataFrame(
+        {"BusinessEntityID": [304], "FirstName": ["Grace"], "LastName": ["Hopper"]}
+    )
+
+    with pytest.raises(RuntimeError, match="Unresolved Person references"):
+        clean_customer(customers, people)
 
 
 def test_clean_sales_order_header_renames_casts_and_deduplicates():

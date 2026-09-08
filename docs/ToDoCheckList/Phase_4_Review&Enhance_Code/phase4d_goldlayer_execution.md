@@ -27,7 +27,7 @@ The following decisions are the implementation contract for Phase 4D. Where earl
 | Silver snapshot | Phase 4D uses the existing metadata-based snapshot gate and does not redesign Silver as an atomic multi-table publication. Gold runs only when all six Silver targets are published and share the same `source_snapshot_id`. |
 | Identity | Gold results distinguish `pipeline_snapshot_id`, `source_snapshot_id`, `gold_run_id`, and `gold_load_id`. A retry of the same load keeps `gold_load_id`; a batch retry keeps `batch_id`; a pipeline rerun creates a new `gold_run_id`; the same Silver snapshot may produce a new Gold version. |
 | Gold publication | Use a versioned schema and current pointer; do not publish Gold tables independently. Build the candidate in its own schema version and update the current pointer only after every validation and KPI check passes. |
-| Gold schema | Phase 4D builds six tables: `dim_date`, `dim_customer`, `dim_product`, `dim_territory`, `dim_salesperson`, and `fact_sales`. Keep `created_at`, and add `gold_version` and `source_snapshot_id`. Map `class -> product_class` and `style -> product_style`. |
+| Gold schema | Phase 4D builds six tables: `dim_date`, `dim_customer`, `dim_product`, `dim_territory`, `dim_salesperson`, and `fact_sales`. Keep `created_at`, and add `gold_version` and `source_snapshot_id`. Map `class -> product_class` and `style -> product_style`. `dim_customer` preserves the approved Silver semantics for `customer_name`, `customer_type`, and `customer_name_source`. |
 | Fact strategy | Use the stable-key batch strategy on `sales_order_detail_id`; do not use offsets/page numbers and do not implement a SQL-side fact path in Phase 4D. |
 | KPI gate | Run KPI validation against the candidate version before updating the current pointer, using the Silver baseline from the same `source_snapshot_id` and a default 2% tolerance. KPI mismatch is deterministic and is not retried. |
 | Builder compatibility | Preserve the current pure-builder APIs and return types. The new Gold job owns pre-validation, staging, retry, audit, and publication; legacy `run()` only delegates. |
@@ -128,7 +128,7 @@ flowchart LR
 | Target | Grain/key | Build strategy | Publication requirement |
 |---|---|---|---|
 | `gold.dim_date` | One row per calendar date; PK `date_id` | Full-read header date range is allowed | Complete date range and unique key before publish |
-| `gold.dim_customer` | One row per `customer_id`; PK `customer_id` | Full-read dimension is allowed | Required columns, unique key, and customer references validated |
+| `gold.dim_customer` | One row per `customer_id`; PK `customer_id` | Full-read dimension is allowed | Required columns, unique key, customer references, and approved customer naming/source fields validated |
 | `gold.dim_product` | One row per `product_id`; PK `product_id` | Full-read dimension is allowed | Output/schema naming aligned with DDL |
 | `gold.dim_territory` | One row per `territory_id`; PK `territory_id` | Full-read dimension is allowed | Unique key and referenced territory keys validated |
 | `gold.dim_salesperson` | One row per `salesperson_id`; PK `salesperson_id` | Full-read dimension is allowed | Nullable fact FK policy is explicit |

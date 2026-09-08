@@ -88,7 +88,10 @@ def build_dim_date(headers: pd.DataFrame) -> pd.DataFrame:
 def build_dim_customer(customers: pd.DataFrame) -> pd.DataFrame:
     return _select_dimension_rows(
         customers,
-        ["customer_id", "customer_name", "person_id", "store_id", "territory_id", "account_number"],
+        [
+            "customer_id", "customer_name", "customer_type", "customer_name_source",
+            "person_id", "store_id", "territory_id", "account_number",
+        ],
         "customer_id",
     )
 

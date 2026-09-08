@@ -114,6 +114,7 @@ Required Silver statuses:
 | Database write | Write only to run-specific Silver staging | Staging cleanup and transaction handling can leave orphan objects | Reuse `StagingManager`, audit, checkpoint, cleanup, and reconciliation contracts |
 | Validation | Convert `validate_silver.py` checks into an injectable validation service/gate | Existing report may check published tables after destructive writes | Validate staging before publish; retain report rendering as a compatibility/reporting surface |
 | Person enrichment | Make `bronze.person` an explicit dependency for salesperson transformation | Current fallback can hide missing upstream data | Fail closed by default; degraded mode requires a separate approved decision and test |
+| Customer enrichment | Enrich individual customers from `bronze.person`; retain `account_number` for store customers | A single naming rule misrepresents either individual or store customers | Use conditional enrichment with `customer_type` and `customer_name_source`; fail closed when an individual `PersonID` cannot be resolved |
 | Shared ingestion | Reuse standard identity/status/result/retry/publish contracts | Parallel Silver-only infrastructure would drift from Bronze/Gold | Architecture/import review and shared contract tests |
 | Pipeline orchestration | Silver failure must prevent Gold execution | A result-only validation could still allow downstream execution | Fake-job sequencing test in the pipeline layer |
 
@@ -131,7 +132,7 @@ Required Silver statuses:
 
 | Item | Treatment |
 |---|---|
-| Customer name semantics | Existing code derives `customer_name` from `account_number`. Do not silently redefine it in Phase 4C. Record a business decision before changing the rule; keep the current rule as a compatibility baseline. |
+| Customer name semantics | **Decision approved 2026-09-08: conditional Person/account enrichment.** For an individual customer with `PersonID`, set `customer_name` to trimmed `FirstName + LastName` from `bronze.person` and set `customer_name_source=PERSON`. For a store customer without `PersonID`, set `customer_name=account_number` and `customer_name_source=ACCOUNT`. Set `customer_type` to `INDIVIDUAL` or `STORE`. If an individual has `PersonID` but no matching Person row or required Person columns, fail closed and do not publish the Silver snapshot. | Implementation and tests are still pending; do not silently fall back to `CustomerID` or `account_number` for an unresolved individual. |
 | Person degraded mode | Not enabled by default. Missing `bronze.person` fails salesperson transformation. A degraded mode needs explicit approval, configuration, report semantics, and tests. |
 | Gold implementation | Out of scope except for enforcing the Silver-to-Gold validation gate. |
 | Database migration deployment | DDL for persistent Silver quarantine/audit/staging may be implemented here, but production migration rollout is tracked with the shared/database delivery workstream. |
@@ -174,6 +175,7 @@ Do not implement Silver retry or publication changes before staging identity and
 | 6.2.3 | Add batch identity and lineage | Reuse `run_id`, `load_id`, `batch_id`; preserve source hash/load metadata | Retry of a chunk keeps logical identity; hash is deterministic for the same source record | 6.2.1 | Done |
 | 6.2.4 | Make transformations deterministic | Refine cleaner path for mapping, trim, dates, numeric values, flags, and enrichment | Same input snapshot and transformation version produce equivalent output independent of chunk boundaries | 6.2.1 | Done |
 | 6.2.5 | Remove unsafe silent fallback | Enforce Person dependency for salesperson transformation | Missing `bronze.person` returns `FAILED` and does not publish salesperson Silver; no `print()` fallback | 6.1.3 | Done |
+| 6.2.6 | Implement customer name enrichment policy | Conditional Person/account enrichment | Individual customers use Person names; store customers use account number; unresolved individual Person references fail closed | 6.1.3, business decision 2026-09-08 | Done |
 
 ### 6.3 Input and conversion validation
 
@@ -226,6 +228,7 @@ Do not implement Silver retry or publication changes before staging identity and
 | 6.7.5 | Add publish-safety tests | Staging/publish fake and PostgreSQL integration tests | Failed validation/build preserves old Silver; successful validation publishes the complete new version | 6.6 | Done |
 | 6.7.6 | Add orchestration gate test | Fake pipeline stage test | Silver failure or validation failure prevents Gold execution | 6.6.2 | Done |
 | 6.7.7 | Run Silver regression | Focused and repository suites | Focused Silver tests pass; unit suite remains independent of external services; integration results identify unavailable prerequisites | All prior tasks | Done |
+| 6.7.8 | Add customer enrichment tests | Individual/store/missing-Person fixtures | Individual names come from Person, stores retain account number, source/type fields are valid, and unresolved individual references fail before publication | 6.2.6 | Done |
 
 ## 7. Verifiable acceptance criteria
 
@@ -243,6 +246,8 @@ Do not implement Silver retry or publication changes before staging identity and
 - [x] Transform output is deterministic for the same Bronze snapshot and transformation version, regardless of chunk boundaries.
 - [x] Required source conversion failures are identified and rejected with field-level reason; `errors="coerce"` is not used as silent error handling.
 - [x] Person enrichment is explicit and missing Person data does not silently produce salesperson names from IDs.
+- [x] Customer enrichment follows the approved policy: individual customers use Person names, store customers use account numbers, and unresolved individual Person references fail closed.
+- [x] `customer_type` and `customer_name_source` are populated and included in the approved Silver/Gold schema contract.
 
 ### 7.3 Quarantine and dedup acceptance
 
@@ -352,7 +357,7 @@ Production DoD must not be inferred from cleaner unit tests alone; staging trans
 | Cleaner API break | Existing tests/scripts stop working | Keep signatures and use a delegating compatibility wrapper |
 | Large Bronze table | Memory pressure and slow transformation | Chunked read and bounded staging writes; keep global state in database |
 | Validation checks published tables | Failure is detected after destructive write | Run all required checks against staging before publication |
-| Business rule ambiguity | Incorrect customer/person semantics | Keep current behavior unless decision is recorded; mark unresolved scope explicitly |
+| Customer/person semantics | Individual customers may be misrepresented or unresolved Person links may be hidden | Apply the approved conditional Person/account policy; fail closed for unresolved individual references and add focused fixtures before marking implementation Done |
 
 ## 11. Evidence log
 
@@ -369,6 +374,7 @@ Update this table after each task. A task may be marked `Done` only when the imp
 | 2026-09-05 | Implement input/conversion validation and quarantine | `sales_silver_job.py`, shared quarantine services, `tests/test_silver_job.py`, `tests/test_bronze_quarantine.py` | Focused shared command | Schema, conversion, quarantine and threshold behavior verified | Done |
 | 2026-09-05 | Implement global dedup, validation gate, and atomic publish | `sales_silver_job.py`, `postgres_publish_service.py`, `tests/test_silver_job.py`, `tests/test_postgres_publish_reconciliation.py` | Focused Silver/shared command | Global dedup, retry, checkpoint, validation gate and publish preservation verified | Done |
 | 2026-09-05 | Run focused Silver and repository regression tests | `tests/` | Focused commands; `pytest -m "not integration" -q`; `pytest -q` | 6, 18, 116 and 116 tests passed respectively | Done |
+| 2026-09-08 | Implement approved customer enrichment policy | `sales_silver_clean.py`, `sales_silver_job.py`, Gold builder/DDL, customer Silver/Gold schema | `pytest tests/test_sales_silver.py tests/test_gold_validation.py tests/test_gold_constraints.py tests/test_sales_gold.py tests/test_gold_job.py tests/test_gold_publish.py tests/test_gold_rerun.py -q`; `pytest -q` | Customer individual/store/missing-Person fixtures pass; focused Gold group 35 passed; full regression 207 passed | Done |
 
 ## 12. Related documents
 

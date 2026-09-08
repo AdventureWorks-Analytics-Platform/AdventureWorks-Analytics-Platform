@@ -35,9 +35,16 @@ CREATE TABLE IF NOT EXISTS silver.customer_clean (
     territory_id INTEGER,
     account_number VARCHAR(50),
     customer_name VARCHAR(255),
+    customer_type VARCHAR(20),
+    customer_name_source VARCHAR(20),
     _source_system VARCHAR(100),
     _load_date TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE silver.customer_clean
+    ADD COLUMN IF NOT EXISTS customer_type VARCHAR(20);
+ALTER TABLE silver.customer_clean
+    ADD COLUMN IF NOT EXISTS customer_name_source VARCHAR(20);
 
 CREATE TABLE IF NOT EXISTS silver.product_clean (
     product_id INTEGER PRIMARY KEY,

@@ -1,12 +1,19 @@
 CREATE TABLE IF NOT EXISTS gold.dim_customer (
     customer_id INTEGER PRIMARY KEY,
     customer_name VARCHAR(255),
+    customer_type VARCHAR(20),
+    customer_name_source VARCHAR(20),
     person_id INTEGER,
     store_id INTEGER,
     territory_id INTEGER,
     account_number VARCHAR(50),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE gold.dim_customer
+    ADD COLUMN IF NOT EXISTS customer_type VARCHAR(20);
+ALTER TABLE gold.dim_customer
+    ADD COLUMN IF NOT EXISTS customer_name_source VARCHAR(20);
 
 CREATE TABLE IF NOT EXISTS gold.dim_product (
     product_id INTEGER PRIMARY KEY,
