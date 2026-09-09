@@ -1,6 +1,11 @@
 from src.app.bronze_snapshot_gate import BronzeSnapshotGate, REQUIRED_BRONZE_TARGETS
 from src.app.bronze_to_silver_pipeline import BronzeToSilverPipeline
+from src.core.settings import Settings
 from src.features.Person.jobs.person_bronze_job import PersonBronzeJob
+from src.shared.ingestion.postgres_publish_service import (
+    PostgresSilverDedupService,
+    PostgresSilverStagingValidator,
+)
 
 
 class _FakeBronze:
@@ -186,6 +191,31 @@ def test_default_pipeline_includes_person_bronze_dependency():
     pipeline = BronzeToSilverPipeline()
 
     assert any(isinstance(job, PersonBronzeJob) for job in pipeline.bronze_jobs)
+
+
+def _settings(**overrides):
+    values = {
+        "sql_server_host": "sql-host",
+        "postgres_username": "warehouse-user",
+        "postgres_password": "warehouse-secret",
+        "_env_file": None,
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
+def test_default_silver_job_has_no_sql_dedup_wiring_when_flag_disabled():
+    pipeline = BronzeToSilverPipeline(settings=_settings())
+
+    assert pipeline.silver_job.dedup_service is None
+    assert pipeline.silver_job.sql_validator is None
+
+
+def test_default_silver_job_wires_sql_dedup_when_flag_enabled():
+    pipeline = BronzeToSilverPipeline(settings=_settings(silver_sql_dedup_enabled=True))
+
+    assert isinstance(pipeline.silver_job.dedup_service, PostgresSilverDedupService)
+    assert isinstance(pipeline.silver_job.sql_validator, PostgresSilverStagingValidator)
 
 
 def test_sales_and_person_bronze_complete_before_silver():

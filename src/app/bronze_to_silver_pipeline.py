@@ -13,6 +13,11 @@ from src.features.Sales_Performance.jobs.sales_bronze_ingestion_job import (
     SalesBronzeIngestionJob,
 )
 from src.features.Sales_Performance.jobs.sales_silver_job import SalesSilverJob
+from src.shared.ingestion.postgres_publish_service import (
+    PostgresSilverPublishService,
+    PostgresSilverStagingWriter,
+    build_silver_sql_dedup_kwargs,
+)
 
 
 class BronzeToSilverPipeline:
@@ -33,7 +38,12 @@ class BronzeToSilverPipeline:
             PersonBronzeJob(self.settings),
             ProductionBronzeJob(self.settings),
         )
-        self.silver_job = silver_job or SalesSilverJob(settings=self.settings)
+        self.silver_job = silver_job or SalesSilverJob(
+            settings=self.settings,
+            staging_writer=PostgresSilverStagingWriter(self.settings),
+            publish_service=PostgresSilverPublishService(self.settings),
+            **build_silver_sql_dedup_kwargs(self.settings),
+        )
         self.snapshot_gate = snapshot_gate or BronzeSnapshotGate()
 
     def run(

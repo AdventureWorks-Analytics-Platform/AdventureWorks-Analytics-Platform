@@ -12,6 +12,10 @@ from sqlalchemy.pool import StaticPool
 
 from src.features.Sales_Performance.jobs.sales_silver_job import SalesSilverJob
 from src.shared.connectors.postgres_connector import PostgreSQLConnector
+from src.shared.ingestion.postgres_publish_service import (
+    PostgresSilverPublishService,
+    PostgresSilverStagingWriter,
+)
 
 
 SILVER_TABLES = {
@@ -321,7 +325,11 @@ CLEANERS = {
 
 def run() -> Dict[str, Dict[str, int]]:
     """Legacy Silver entrypoint that delegates to the injectable job/service."""
-    return SalesSilverJob().run()
+    job = SalesSilverJob(
+        staging_writer=PostgresSilverStagingWriter(),
+        publish_service=PostgresSilverPublishService(),
+    )
+    return job.run()
 
 
 if __name__ == "__main__":

@@ -92,3 +92,22 @@ def test_app_pipeline_failure_is_degraded():
     assert result["status"] == "degraded"
     assert result["bronze_gate"]["status"] == "FAILED"
     assert result["silver"] is None
+
+
+class _Runner:
+    def __init__(self, result):
+        self.result = result
+
+    def run(self, mode="full"):
+        return self.result
+
+
+def test_app_partial_success_is_degraded_not_ok():
+    app = App.__new__(App)
+    app.pipeline_runner = _Runner({"status": "PARTIAL_SUCCESS", "failed_stage": "silver"})
+
+    result = app.run()
+
+    assert result["status"] == "degraded"
+    assert result["failed_stage"] == "silver"
+

@@ -26,6 +26,14 @@ def test_settings_parse_types_and_keep_password_out_of_safe_summary():
     assert "warehouse-secret" not in str(settings.safe_summary())
 
 
+def test_silver_sql_dedup_disabled_by_default():
+    settings = make_settings()
+
+    assert settings.silver_sql_dedup_enabled is False
+    assert settings.safe_summary()["silver_sql_dedup_enabled"] is False
+
+
+
 def test_settings_environment_override(monkeypatch):
     monkeypatch.setenv("BATCH_SIZE", "2500")
     monkeypatch.setenv("BRONZE_REJECTED_THRESHOLD", "7")

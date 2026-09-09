@@ -11,6 +11,7 @@ from src.features.Sales_Performance.jobs.sales_silver_job import SalesSilverJob
 from src.shared.ingestion.postgres_publish_service import (
     PostgresSilverPublishService,
     PostgresSilverStagingWriter,
+    build_silver_sql_dedup_kwargs,
 )
 from scripts.warehouse.postgres.gold.sales_gold_load import _build_default_gold_job
 from src.shared.services.connection_health_service import ConnectionHealthService
@@ -105,6 +106,7 @@ class App:
             settings=self.settings,
             staging_writer=silver_staging_writer,
             publish_service=PostgresSilverPublishService(self.settings),
+            **build_silver_sql_dedup_kwargs(self.settings),
         )
         self.bronze_to_silver_pipeline = BronzeToSilverPipeline(
             bronze_jobs=(
@@ -139,6 +141,6 @@ class App:
         return {
             **result,
             "status": "ok"
-            if result["status"] in {"SUCCESS", "SUCCESS_WITH_REJECTIONS", "PARTIAL_SUCCESS"}
+            if result["status"] in {"SUCCESS", "SUCCESS_WITH_REJECTIONS"}
             else "degraded",
         }

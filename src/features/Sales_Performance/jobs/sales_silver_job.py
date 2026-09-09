@@ -222,6 +222,9 @@ class SilverTransformationJob:
         staging_writer: Callable[[pd.DataFrame, str], None] | None = None,
         validator: Callable[..., dict] | None = None,
         publish_service: Any | None = None,
+        dedup_service: Any | None = None,
+        staging_reader: Callable[[str], pd.DataFrame] | None = None,
+        sql_validator: Any | None = None,
     ):
         self.settings = settings or get_settings()
         self.table_specs = tuple(table_specs or SALES_SILVER_TABLE_SPECS)
@@ -254,6 +257,9 @@ class SilverTransformationJob:
         self.staging_writer = staging_writer or self._default_staging_writer
         self.validator = validator or self._default_staging_validator
         self.publish_service = publish_service
+        self.dedup_service = dedup_service
+        self.staging_reader = staging_reader or self._default_staging_reader
+        self.sql_validator = sql_validator
         self.dependency_order = [spec.source_table for spec in self.table_specs]
 
     def _default_reader(self, source_table: str, settings: object) -> pd.DataFrame:
@@ -586,6 +592,12 @@ class SilverTransformationJob:
         ]
 
     def _default_writer(self, silver_frame: pd.DataFrame, target_name: str) -> None:
+        if self.publish_service is None:
+            raise RuntimeError(
+                "Refusing unsafe to_sql(if_exists='replace') write: no publish_service "
+                "or custom writer was injected. Inject a publish_service (e.g. "
+                "PostgresSilverPublishService) for atomic staging publish."
+            )
         from scripts.transformation.silver.sales_silver_clean import _warehouse_engine
         from src.shared.connectors.postgres_connector import PostgreSQLConnector
 
@@ -603,6 +615,37 @@ class SilverTransformationJob:
 
     def _default_staging_writer(self, silver_frame: pd.DataFrame, staging_name: str) -> None:
         self._staging_frames.setdefault(staging_name, []).append(silver_frame.copy())
+
+    def _default_staging_reader(self, staging_name: str) -> pd.DataFrame:
+        frames = self._staging_frames.get(staging_name, [])
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
+    def _rewrite_staged_content(self, silver_frame: pd.DataFrame, staging_name: str) -> None:
+        """Overwrite per-batch staged rows with the globally deduplicated frame.
+
+        Without this, `publish_service.publish()` renames the raw staging table
+        (still containing cross-batch duplicates) instead of the deduplicated result.
+        """
+        replace_all = getattr(self.staging_writer, "replace_all", None)
+        if callable(replace_all):
+            replace_all(silver_frame, staging_name)
+        else:
+            self._staging_frames[staging_name] = [silver_frame.copy()]
+
+    @staticmethod
+    def _resolve_row_count(
+        silver_frame: pd.DataFrame | None, validation_report: dict | None
+    ) -> int:
+        """Row count for results, without requiring a materialized frame.
+
+        Falls back to the SQL validator's `target_count` on the full SQL path
+        (`silver_frame is None`), where staging is never read back into pandas.
+        """
+        if silver_frame is not None:
+            return len(silver_frame)
+        return int((validation_report or {}).get("target_count", 0))
 
     @staticmethod
     def _content_hash(frame: pd.DataFrame) -> str:
@@ -894,7 +937,8 @@ class SilverTransformationJob:
                     silver_chunk = self.transformer(
                         spec.source_table, valid_chunk, person_frame
                     )
-                    silver_chunks.append(silver_chunk)
+                    if self.dedup_service is None:
+                        silver_chunks.append(silver_chunk)
                     staged_silver_chunk = silver_chunk.copy()
                     if not staged_silver_chunk.empty:
                         staged_silver_chunk["source_snapshot_id"] = resolved_run_id
@@ -958,82 +1002,155 @@ class SilverTransformationJob:
                     "'bronze.person' is unavailable."
                 )
 
-            if silver_chunks:
-                silver_frame = pd.concat(silver_chunks, ignore_index=True)
+            if self.dedup_service is not None:
+                try:
+                    duplicate_detail_count = self.dedup_service.count_duplicate_keys(
+                        staging.name, spec.primary_key
+                    )
+                except Exception as exc:
+                    duplicate_detail_exc = SilverValidationError(
+                        f"Duplicate-key check failed for {spec.target_name}: {exc}"
+                    )
+                else:
+                    duplicate_detail_exc = None
+                    if spec.source_table == "sales_order_detail" and duplicate_detail_count:
+                        duplicate_detail_exc = SilverValidationError(
+                            f"Duplicate detail grain for {spec.target_name}: "
+                            f"{spec.primary_key} duplicates={duplicate_detail_count}"
+                        )
+                if duplicate_detail_exc is not None:
+                    self.staging_manager.mark_failed(staging.name)
+                    results[spec.target_table] = {
+                        "status": "FAILED",
+                        "source_count": source_count,
+                        "target_count": 0,
+                        "rows_read": source_count,
+                        "rows_valid": source_count - len(rejected_records),
+                        "rows_rejected": len(rejected_records),
+                        "rows_deduplicated": 0,
+                        "rows_published": 0,
+                        "rejection_reasons": self._rejection_summaries(rejected_records),
+                        "attempt_count": attempt_count,
+                        "staging_name": staging.name,
+                        "published": False,
+                        "error_type": type(duplicate_detail_exc).__name__,
+                        "error_message": str(duplicate_detail_exc),
+                    }
+                    apply_standard_result(
+                        results[spec.target_table],
+                        "FAILED",
+                        0,
+                        type(duplicate_detail_exc).__name__,
+                        str(duplicate_detail_exc),
+                    )
+                    continue
+                # SQL-side dedup mutates the staged Postgres table directly, so no
+                # in-memory concat/rewrite is needed; read back only for validation.
+                rows_deduplicated = self.dedup_service.deduplicate(
+                    staging.name, spec.primary_key
+                )
+                if self.sql_validator is not None:
+                    if self.publish_service is None:
+                        raise RuntimeError(
+                            "sql_validator requires publish_service: the legacy "
+                            "in-memory writer cannot run without a materialized frame."
+                        )
+                    # Full SQL path: staging is never read back into pandas at all.
+                    validation_report = self.sql_validator.validate(
+                        staging.name, spec, source_count, len(rejected_records),
+                        self.rejected_threshold,
+                    )
+                    set_snapshot_id = getattr(
+                        self.dedup_service, "set_source_snapshot_id", None
+                    )
+                    if callable(set_snapshot_id):
+                        set_snapshot_id(staging.name, resolved_run_id)
+                    silver_frame = None
+                else:
+                    silver_frame = self.staging_reader(staging.name)
+                    if not silver_frame.empty:
+                        silver_frame["source_snapshot_id"] = resolved_run_id
+                    validation_report = None
             else:
-                silver_frame = pd.DataFrame()
-            try:
-                self._validate_detail_grain(silver_frame, spec)
-            except SilverValidationError as exc:
-                self.staging_manager.mark_failed(staging.name)
-                results[spec.target_table] = {
-                    "status": "FAILED",
-                    "source_count": source_count,
-                    "target_count": len(silver_frame),
-                    "rows_read": source_count,
-                    "rows_valid": source_count - len(rejected_records),
-                    "rows_rejected": len(rejected_records),
-                    "rows_deduplicated": 0,
-                    "rows_published": 0,
-                    "rejection_reasons": self._rejection_summaries(rejected_records),
-                    "attempt_count": attempt_count,
-                    "staging_name": staging.name,
-                    "published": False,
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                }
-                apply_standard_result(
-                    results[spec.target_table],
-                    "FAILED",
-                    0,
-                    type(exc).__name__,
-                    str(exc),
+                if silver_chunks:
+                    silver_frame = pd.concat(silver_chunks, ignore_index=True)
+                else:
+                    silver_frame = pd.DataFrame()
+                try:
+                    self._validate_detail_grain(silver_frame, spec)
+                except SilverValidationError as exc:
+                    self.staging_manager.mark_failed(staging.name)
+                    results[spec.target_table] = {
+                        "status": "FAILED",
+                        "source_count": source_count,
+                        "target_count": len(silver_frame),
+                        "rows_read": source_count,
+                        "rows_valid": source_count - len(rejected_records),
+                        "rows_rejected": len(rejected_records),
+                        "rows_deduplicated": 0,
+                        "rows_published": 0,
+                        "rejection_reasons": self._rejection_summaries(rejected_records),
+                        "attempt_count": attempt_count,
+                        "staging_name": staging.name,
+                        "published": False,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    }
+                    apply_standard_result(
+                        results[spec.target_table],
+                        "FAILED",
+                        0,
+                        type(exc).__name__,
+                        str(exc),
+                    )
+                    continue
+                silver_frame, rows_deduplicated = self._global_deduplicate(
+                    silver_frame, spec
                 )
-                continue
-            silver_frame, rows_deduplicated = self._global_deduplicate(
-                silver_frame, spec
-            )
-            if not silver_frame.empty:
-                silver_frame["source_snapshot_id"] = resolved_run_id
-            try:
-                self._validate_output_schema(silver_frame, spec)
-            except SilverValidationError as exc:
-                self.staging_manager.mark_failed(staging.name)
-                results[spec.target_table] = {
-                    "status": "FAILED",
-                    "source_count": source_count,
-                    "target_count": 0,
-                    "rows_read": source_count,
-                    "rows_valid": source_count - len(rejected_records),
-                    "rows_rejected": len(rejected_records),
-                    "rows_deduplicated": 0,
-                    "rows_published": 0,
-                    "rejection_reasons": self._rejection_summaries(rejected_records),
-                    "attempt_count": attempt_count,
-                    "staging_name": staging.name,
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                }
-                apply_standard_result(
-                    results[spec.target_table],
-                    "FAILED",
-                    0,
-                    type(exc).__name__,
-                    str(exc),
+                if not silver_frame.empty:
+                    silver_frame["source_snapshot_id"] = resolved_run_id
+                self._rewrite_staged_content(silver_frame, staging.name)
+                validation_report = None
+            if validation_report is None:
+                try:
+                    self._validate_output_schema(silver_frame, spec)
+                except SilverValidationError as exc:
+                    self.staging_manager.mark_failed(staging.name)
+                    results[spec.target_table] = {
+                        "status": "FAILED",
+                        "source_count": source_count,
+                        "target_count": 0,
+                        "rows_read": source_count,
+                        "rows_valid": source_count - len(rejected_records),
+                        "rows_rejected": len(rejected_records),
+                        "rows_deduplicated": 0,
+                        "rows_published": 0,
+                        "rejection_reasons": self._rejection_summaries(rejected_records),
+                        "attempt_count": attempt_count,
+                        "staging_name": staging.name,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    }
+                    apply_standard_result(
+                        results[spec.target_table],
+                        "FAILED",
+                        0,
+                        type(exc).__name__,
+                        str(exc),
+                    )
+                    continue
+                validation_report = self.validator(
+                    silver_frame,
+                    spec,
+                    source_count,
+                    len(rejected_records),
                 )
-                continue
-            validation_report = self.validator(
-                silver_frame,
-                spec,
-                source_count,
-                len(rejected_records),
-            )
             if not validation_report.get("validation_passed", False):
                 self.staging_manager.mark_failed(staging.name)
                 results[spec.target_table] = {
                     "status": "FAILED",
                     "source_count": source_count,
-                    "target_count": len(silver_frame),
+                    "target_count": self._resolve_row_count(silver_frame, validation_report),
                     "rows_read": source_count,
                     "rows_valid": source_count - len(rejected_records),
                     "rows_rejected": len(rejected_records),
@@ -1079,7 +1196,7 @@ class SilverTransformationJob:
                 results[spec.target_table] = {
                     "status": "FAILED",
                     "source_count": source_count,
-                    "target_count": len(silver_frame),
+                    "target_count": self._resolve_row_count(silver_frame, validation_report),
                     "rows_read": source_count,
                     "rows_valid": source_count - len(rejected_records),
                     "rows_rejected": len(rejected_records),
@@ -1103,7 +1220,7 @@ class SilverTransformationJob:
                 continue
             rows_rejected = len(rejected_records)
             rows_valid = source_count - rows_rejected
-            rows_written = len(silver_frame)
+            rows_written = self._resolve_row_count(silver_frame, validation_report)
             results[spec.target_table] = {
                 "status": "SUCCESS_WITH_REJECTIONS" if rows_rejected else "SUCCESS",
                 "source_count": source_count,

@@ -638,3 +638,236 @@ def test_silver_publish_failure_preserves_previous_published_staging(monkeypatch
     assert result["status"] == "FAILED"
     assert result["published"] is False
     assert staging_manager.published_staging(spec.target_table) == previous.name
+
+
+def test_silver_publish_uses_deduplicated_staging_content_not_raw_batches(monkeypatch):
+    """publish() renames the staging table as-is; it must reflect the deduplicated
+    frame, not the raw per-batch appends, or cross-batch duplicates would ship."""
+    spec = _sample_spec()
+    staging_manager = StagingManager()
+    per_batch_calls = []
+
+    class FakeStagingWriter:
+        def __call__(self, frame, staging_name):
+            per_batch_calls.append(frame.copy())
+
+        def replace_all(self, frame, staging_name):
+            self.final_content = frame.copy()
+
+    staging_writer = FakeStagingWriter()
+
+    class FakePublishService:
+        def publish(self, target_table, staging_name, validation_report):
+            return f"silver.{target_table}"
+
+    job = SilverTransformationJob(
+        table_specs=(spec,),
+        reader=lambda _source_table, _settings: pd.DataFrame(),
+        transformer=lambda _source_table, frame, _person_frame: frame.copy(),
+        staging_manager=staging_manager,
+        staging_writer=staging_writer,
+        publish_service=FakePublishService(),
+    )
+    monkeypatch.setattr(
+        job,
+        "read_chunks",
+        lambda *_args, **_kwargs: iter(
+            [
+                pd.DataFrame({"sample_id": [1], "value": [10], "_load_date": ["2026-09-04"]}),
+                pd.DataFrame({"sample_id": [1], "value": [20], "_load_date": ["2026-09-05"]}),
+            ]
+        ),
+    )
+
+    result = job.run()[spec.target_table]
+
+    assert result["status"] == "SUCCESS"
+    assert len(per_batch_calls) == 2  # both raw batches were staged, including the duplicate
+    assert staging_writer.final_content["value"].tolist() == [20]  # but publish sees deduped content
+
+
+class _FakeDedupService:
+    def __init__(self, duplicate_detail_count=0):
+        self.duplicate_detail_count = duplicate_detail_count
+        self.deduplicate_calls = []
+        self.count_calls = []
+
+    def count_duplicate_keys(self, staging_name, primary_key):
+        self.count_calls.append((staging_name, primary_key))
+        return self.duplicate_detail_count
+
+    def deduplicate(self, staging_name, primary_key):
+        self.deduplicate_calls.append((staging_name, primary_key))
+        return 1
+
+
+def test_silver_job_uses_sql_dedup_service_and_skips_in_memory_concat(monkeypatch):
+    """When a dedup_service is injected, no transformed chunk is ever accumulated
+    for a global pandas concat/dedup; SQL owns dedup, staging_reader owns validation input."""
+    spec = _sample_spec()
+    staging_manager = StagingManager()
+    dedup_service = _FakeDedupService()
+    staging_reader_calls = []
+
+    def staging_reader(staging_name):
+        staging_reader_calls.append(staging_name)
+        return pd.DataFrame({"sample_id": [1], "value": [20]})
+
+    class FakePublishService:
+        def publish(self, target_table, staging_name, validation_report):
+            return f"silver.{target_table}"
+
+    silver_chunks_seen = []
+    job = SilverTransformationJob(
+        table_specs=(spec,),
+        reader=lambda _source_table, _settings: pd.DataFrame(),
+        transformer=lambda _source_table, frame, _person_frame: (
+            silver_chunks_seen.append(frame) or frame.copy()
+        ),
+        staging_manager=staging_manager,
+        staging_writer=lambda _frame, _staging_name: None,
+        staging_reader=staging_reader,
+        dedup_service=dedup_service,
+        publish_service=FakePublishService(),
+    )
+    monkeypatch.setattr(
+        job,
+        "read_chunks",
+        lambda *_args, **_kwargs: iter(
+            [
+                pd.DataFrame({"sample_id": [1], "value": [10], "_load_date": ["2026-09-04"]}),
+                pd.DataFrame({"sample_id": [1], "value": [20], "_load_date": ["2026-09-05"]}),
+            ]
+        ),
+    )
+
+    result = job.run()[spec.target_table]
+
+    assert result["status"] == "SUCCESS"
+    assert len(silver_chunks_seen) == 2  # both chunks were transformed and staged...
+    assert dedup_service.count_calls == [(result["staging_name"], spec.primary_key)]
+    assert dedup_service.deduplicate_calls == [(result["staging_name"], spec.primary_key)]
+    assert staging_reader_calls == [result["staging_name"]]  # ...but only read back once for validation
+    assert result["rows_deduplicated"] == 1
+
+
+def test_silver_job_sql_dedup_fails_closed_on_duplicate_detail_grain(monkeypatch):
+    spec = SALES_SILVER_TABLE_SPECS[1]
+    assert spec.source_table == "sales_order_detail"
+    staging_manager = StagingManager()
+    dedup_service = _FakeDedupService(duplicate_detail_count=2)
+
+    job = SilverTransformationJob(
+        table_specs=(spec,),
+        reader=lambda _source_table, _settings: pd.DataFrame(),
+        transformer=lambda _source_table, frame, _person_frame: frame.copy(),
+        staging_manager=staging_manager,
+        staging_writer=lambda _frame, _staging_name: None,
+        dedup_service=dedup_service,
+        publish_service=object(),
+    )
+    monkeypatch.setattr(
+        job,
+        "read_chunks",
+        lambda *_args, **_kwargs: iter(
+            [
+                pd.DataFrame(
+                    {
+                        "SalesOrderID": [1, 1],
+                        "SalesOrderDetailID": [10, 10],
+                        "ProductID": [1, 1],
+                        "OrderQty": [1, 1],
+                        "UnitPrice": [1.0, 1.0],
+                        "UnitPriceDiscount": [0.0, 0.0],
+                        "LineTotal": [1.0, 1.0],
+                    }
+                )
+            ]
+        ),
+    )
+
+    result = job.run()[spec.target_table]
+
+    assert result["status"] == "FAILED"
+    assert result["error_type"] == "SilverValidationError"
+    assert "Duplicate detail grain" in result["error_message"]
+    assert dedup_service.deduplicate_calls == []  # dedup never runs once grain check fails
+
+
+class _FakeSqlValidator:
+    def __init__(self, report):
+        self.report = report
+        self.calls = []
+
+    def validate(self, staging_name, spec, source_count, rejected_count, rejected_threshold):
+        self.calls.append((staging_name, source_count, rejected_count, rejected_threshold))
+        return dict(self.report)
+
+
+def test_silver_job_full_sql_path_never_reads_staging_into_pandas(monkeypatch):
+    """With dedup_service + sql_validator, staging_reader must never be called at all."""
+    spec = _sample_spec()
+    staging_manager = StagingManager()
+    sql_validator = _FakeSqlValidator(
+        {"validation_passed": True, "target_count": 1, "issues": []}
+    )
+    staging_reader_calls = []
+    snapshot_calls = []
+
+    class FakeDedupServiceWithSnapshot(_FakeDedupService):
+        def set_source_snapshot_id(self, staging_name, source_snapshot_id):
+            snapshot_calls.append((staging_name, source_snapshot_id))
+
+    dedup_service = FakeDedupServiceWithSnapshot()
+
+    class FakePublishService:
+        def publish(self, target_table, staging_name, validation_report):
+            return f"silver.{target_table}"
+
+    job = SilverTransformationJob(
+        table_specs=(spec,),
+        reader=lambda _source_table, _settings: pd.DataFrame(),
+        transformer=lambda _source_table, frame, _person_frame: frame.copy(),
+        staging_manager=staging_manager,
+        staging_writer=lambda _frame, _staging_name: None,
+        staging_reader=lambda name: staging_reader_calls.append(name) or pd.DataFrame(),
+        dedup_service=dedup_service,
+        sql_validator=sql_validator,
+        publish_service=FakePublishService(),
+    )
+    monkeypatch.setattr(
+        job,
+        "read_chunks",
+        lambda *_args, **_kwargs: iter(
+            [pd.DataFrame({"sample_id": [1], "value": [10], "_load_date": ["2026-09-04"]})]
+        ),
+    )
+
+    result = job.run()[spec.target_table]
+
+    assert result["status"] == "SUCCESS"
+    assert result["target_count"] == 1
+    assert staging_reader_calls == []  # never read staging back into pandas
+    assert len(sql_validator.calls) == 1
+    assert snapshot_calls == [(result["staging_name"], result["run_id"])]
+
+
+def test_silver_job_sql_validator_requires_publish_service():
+    spec = _sample_spec()
+    dedup_service = _FakeDedupService()
+    sql_validator = _FakeSqlValidator({"validation_passed": True, "target_count": 0, "issues": []})
+
+    job = SilverTransformationJob(
+        table_specs=(spec,),
+        reader=lambda _source_table, _settings: pd.DataFrame(),
+        transformer=lambda _source_table, frame, _person_frame: frame.copy(),
+        staging_writer=lambda _frame, _staging_name: None,
+        dedup_service=dedup_service,
+        sql_validator=sql_validator,
+        writer=lambda _frame, _target_name: None,
+    )
+
+    with pytest.raises(RuntimeError, match="sql_validator requires publish_service"):
+        job.run()
+
+
