@@ -1,64 +1,96 @@
 # AdventureWorks Analytics Platform
 
-AdventureWorks Analytics Platform is a medallion-style data platform built to bring AdventureWorks data from the source system into a warehouse, clean and standardize it, create analytical tables, and serve revenue and sales performance reporting.
+AdventureWorks Analytics Platform is an **end-to-end data platform** built on the **Medallion architecture (Bronze → Silver → Gold)**. It moves data from SQL Server AdventureWorks2012 into a PostgreSQL warehouse, cleans and standardizes it, builds an analytical model, and serves Sales Performance reporting.
 
-The important part of this repository is not limited to the Bronze, Silver, and Gold tables. After the 4A, 4B, 4C, and 4D refactors, the system also has a shared platform layer for configuration, connections, identity, retries, auditing, checkpoints, staging, quarantine, validation, and publication. This allows pipelines to fail safely, rerun in a controlled way, and preserve the latest known-good data version.
+In addition to the Bronze, Silver, and Gold layers, the system includes a **shared platform layer** used across the pipeline: configuration, connections, identity, retries, auditing, checkpoints, staging, quarantine, validation, and publication. This allows the pipeline to fail safely, rerun in a controlled manner, and preserve the last known-good data snapshot.
+
+> **Core design principle:** Features use shared infrastructure; shared infrastructure does not depend on any specific feature.
+
+---
+
+## Tech Stack
+
+| Component | Technology |
+|---|---|
+| Language | Python 3.11 |
+| Source DB | SQL Server + AdventureWorks2012 |
+| Warehouse | PostgreSQL 5432 |
+| ORM / DB | SQLAlchemy 2.0, pyodbc, psycopg2 |
+| Data processing | Pandas, NumPy, PyArrow |
+| Configuration | pydantic-settings |
+| Testing | pytest, pytest-cov |
+| Code quality | Black, Flake8, MyPy, pylint, isort |
+| Infrastructure | Docker Compose (PostgreSQL) |
+| Reporting | Power BI |
+
+---
+
+## Medallion Architecture
+
+```text
+Source (SQL Server — AdventureWorks2012)
+    ↓  Extract
+Bronze Layer   — raw data + audit / lineage / staging / quarantine
+    ↓  Validate & Clean
+Silver Layer   — 6 standardized tables with snapshot identity
+    ↓  Model
+Gold Layer     — star schema: 5 dimensions + fact_sales
+    ↓
+Dashboard      — Sales Performance reporting (Power BI)
+```
+
+| Layer | Role | Outcome |
+|---|---|---|
+| Bronze | Raw landing with audit and lineage | Source data, per-run staging, rejected records, retry-safe publication |
+| Silver | Cleaning and standardization | 6 clean analytical tables with snapshot identity |
+| Gold | Analytical model | 5 dimensions, `fact_sales`, KPI validation, versioned publication |
+| Dashboard | Consumption / reporting | Sales Performance reporting from analytical output |
+
+---
 
 ## System Story
 
-Initially, the application had a thin entry point and several jobs tightly coupled to Sales logic. As the scope expanded, the system was separated into three clear areas:
+Initially, the application had only a thin entry point and jobs tightly coupled to Sales logic. As the scope expanded, the system was divided into three clearly defined areas:
 
 ```text
-src/app/       orchestration and pipeline gates
-src/features/  domain-specific business logic
-src/shared/    shared ingestion infrastructure
-src/core/      settings and minimal compatibility shells
+src/app/       — orchestration and pipeline gates
+src/features/  — domain-specific business logic
+src/shared/    — shared ingestion infrastructure
+src/core/      — settings and minimal compatibility shells
 ```
 
-The post-refactor principle is: **features use shared infrastructure; shared infrastructure does not depend on specific features**. Therefore, Sales, Person, and Production can own their own jobs while sharing a consistent set of contracts and operational mechanisms.
+### Phase 4A — Foundation
 
-### 4A - Foundation
-
-Phase 4A established the rules used by every subsequent layer:
-
-- `pydantic-settings` centralizes configuration and hides secrets.
+- `pydantic-settings` centralizes configuration and keeps secrets out of code.
 - `TableSpec` describes the source, target, primary key, required columns, and ordering key.
 - The result model standardizes status, identity, row counts, timing, and errors.
-- Retry, staging, audit, quarantine, and checkpoint capabilities became injectable services.
-- Domain ownership was separated into Sales, Person, and Production.
+- Retry, staging, audit, quarantine, and checkpoint capabilities are injectable services.
+- Domain ownership is separated into Sales, Person, and Production.
 
-From this point on, orchestration no longer needs to know connection details or how each batch is written. It only coordinates components through contracts.
+### Phase 4B — Bronze: Controlled Landing Zone
 
-### 4B - Bronze Becomes a Controlled Landing Zone
+Bronze receives raw data from SQL Server AdventureWorks2012 through three domain jobs:
 
-Bronze receives raw data from SQL Server AdventureWorks2012. The three domain jobs run through the same shared mechanisms:
-
-| Domain job | Bronze targets |
+| Domain Job | Bronze targets |
 |---|---|
-| Sales | `sales_order_header`, `sales_order_detail`, `customer`, `sales_territory`, `sales_person` |
-| Person | `person` |
-| Production | `product` |
+| `SalesBronzeIngestionJob` | `sales_order_header`, `sales_order_detail`, `customer`, `sales_territory`, `sales_person` |
+| `PersonBronzeJob` | `person` |
+| `ProductionBronzeJob` | `product` |
 
-Each table is read by stable ordering key and batch. Data passes through run/load-specific staging, receives lineage metadata, records audit/checkpoint information, quarantines rejected rows, and retries transient failures. Data is published to Bronze only after all staging data passes validation.
+Each table is read in batches using a stable ordering key. Data passes through per-run/load staging, receives lineage metadata, records audit/checkpoint information, quarantines rejected rows, and retries transient failures. Data is published to Bronze only after all staging data passes validation. If a failure occurs, reconciliation and deterministic identity identify what has already been committed without blindly appending duplicates.
 
-If a batch or run fails, reconciliation and deterministic identity allow the system to identify what has already been committed instead of blindly appending. The currently published Bronze data is not deleted until the new version has completed validation.
+### Phase 4C — Silver: Raw Data → Analytical Source
 
-### 4C - Silver Turns Raw Data into an Analytical Source
-
-After all seven Bronze targets belong to the same `snapshot_id` and pass `BronzeSnapshotGate`, Silver runs in a fixed dependency order:
+Once all 7 Bronze targets share the same `snapshot_id` and pass `BronzeSnapshotGate`, Silver runs in a fixed dependency order:
 
 ```text
-sales_order_header
-sales_order_detail
-customer
-sales_territory
-product
-sales_person
+sales_order_header → sales_order_detail → customer
+→ sales_territory → product → sales_person
 ```
 
-Silver reads Bronze in chunks, checks the schema, converts data types, runs business cleaners, quarantines conversion errors, checks grain and primary keys, deduplicates full tables, and validates before publication. `bronze.person` is required to enrich `sales_person`.
+Silver reads Bronze in chunks, checks schemas, converts data types, runs business cleaners, quarantines conversion errors, checks grain/primary keys, deduplicates each full table, and validates the results before publication. `bronze.person` is required to enrich `sales_person`.
 
-Silver produces six standardized tables:
+**Output — 6 clean tables:**
 
 ```text
 silver.sales_order_header_clean
@@ -69,11 +101,11 @@ silver.product_clean
 silver.sales_person_clean
 ```
 
-Silver is considered ready for Gold only when all six tables have been published and share the same `source_snapshot_id`.
+Silver is ready for Gold only when all 6 tables have been published with the same `source_snapshot_id`.
 
-### 4D - Gold Becomes a Safe Analytical Layer
+### Phase 4D — Gold: Safe Analytical Layer (Star Schema)
 
-Gold builds a star schema with five dimensions and one fact:
+Gold builds a star schema with 5 dimensions and 1 fact table:
 
 ```text
 gold.dim_date
@@ -81,81 +113,73 @@ gold.dim_customer
 gold.dim_product
 gold.dim_territory
 gold.dim_salesperson
-gold.fact_sales
+gold.fact_sales          (grain: sales_order_detail_id)
 ```
 
-Small dimensions are read in full. `fact_sales` is read in stable-key batches using `sales_order_detail_id`, ensuring one row per sales order detail. Before publication, Gold checks:
+Small dimension tables are read in full. `fact_sales` is read in stable-key batches. Before publication, Gold checks:
 
 - schema, types, and metadata;
 - primary keys, nullability, and uniqueness;
 - fact grain and orphan references;
 - measure formulas;
-- KPIs against the Silver baseline, with a default tolerance of 2%;
-- PK/FK constraints on the candidate schema.
+- KPIs against the Silver baseline (default tolerance: 2%);
+- primary/foreign key constraints on the candidate schema.
 
-Gold does not write directly to the version currently serving consumers. A candidate is built in a separate schema/version, after which the current pointer is updated atomically. If building, validation, constraints, KPIs, or publication fails, the previous Gold version continues serving data.
+Gold does not write directly to the version currently serving consumers. A candidate is built in a separate schema/version, then the current pointer is updated atomically. If building, validation, constraints, KPIs, or publication fails, the previous Gold version continues serving data (fail-closed).
 
-## Current Workflow
+---
 
-The application's canonical path is:
-
-```text
-main.py
-  -> App.run()
-  -> PipelineRunner.run(mode="full")
-  -> ConnectionHealthService
-  -> PlatformBootstrapJob
-  -> BronzeToSilverPipeline
-       -> SalesBronzeIngestionJob
-       -> PersonBronzeJob
-       -> ProductionBronzeJob
-       -> BronzeSnapshotGate
-       -> SalesSilverJob
-  -> SalesGoldJob
-```
-
-In the current wiring, `App` registers `PostgresSilverPublishService` for Silver and creates the production `SalesGoldJob` from PostgreSQL Gold adapters. `PipelineRunner` receives the Gold job through dependency injection and invokes Gold only after Bronze/Silver succeeds. Therefore:
-
-- `main.py` requires all three stages: Bronze, Silver, and Gold;
-- Silver must publish all six real targets to PostgreSQL before Gold reads them;
-- Gold checks `SilverSnapshotGate`, builds a candidate, validates it, and then publishes atomically;
-- if Silver or Gold fails, the top-level result returns `status=FAILED` and the corresponding `failed_stage`;
-- a live Bronze -> Silver -> Gold run requires SQL Server, PostgreSQL, and the required schema/runtime adapters.
-
-The Gold implementation and stage are now connected to the application entry point. Before publication, Gold maintains the fail-closed principle and does not change the serving version if the candidate does not pass.
-
-## Operational CLI
-
-The delivery entry point supports the validated Phase 4E contract:
+## Repository Structure & Pipeline Flow
 
 ```text
-python -m src.app.cli --mode full --stage full --report logs/pipeline.json
-python -m src.app.cli --mode incremental --stage bronze --report logs/bronze.md --report-format markdown
-python -m src.app.cli --mode full --stage full --log-level INFO --report logs/pipeline.json
+main.py                          # Application entry point
+ └─→ App.run()
+      └─→ PipelineRunner.run(mode="full")
+           ├─→ ConnectionHealthService      # Check SQL Server + PostgreSQL connectivity
+           ├─→ PlatformBootstrapJob         # Create schemas and metadata tables
+           ├─→ BronzeToSilverPipeline
+           │    ├─→ SalesBronzeIngestionJob # Extract 5 Sales tables
+           │    ├─→ PersonBronzeJob         # Extract person
+           │    ├─→ ProductionBronzeJob     # Extract product
+           │    ├─→ BronzeSnapshotGate      # Validate 7 Bronze tables share snapshot_id
+           │    └─→ SalesSilverJob          # Clean, transform → 6 Silver tables
+           └─→ SalesGoldJob                # Build star schema, KPI check, atomic publish
+
+src/
+├── app/                         # Orchestration: pipeline runner, gates, CLI, reporter
+│   ├── app.py
+│   ├── pipeline_runner.py
+│   ├── bronze_to_silver_pipeline.py
+│   ├── bronze_snapshot_gate.py
+│   ├── cli.py
+│   └── reporter.py
+├── core/                        # Settings (pydantic-settings), compatibility shells
+├── shared/                      # Shared ingestion infrastructure
+│   ├── connectors/              # SQL Server + PostgreSQL connectors
+│   ├── ingestion/               # Audit, staging, quarantine, retry, checkpoint, publish
+│   ├── services/                # ConnectionHealthService
+│   └── security/                # Log redaction (che password/credentials trong log)
+├── features/
+│   ├── Sales_Performance/       # Sales Bronze / Silver / Gold + domain logic
+│   │   ├── domain/bronze/       # SalesExtractor, BronzeLoader, BronzeValidator
+│   │   └── jobs/                # sales_bronze_job, sales_silver_job, sales_gold_job
+│   ├── Person/                  # Person Bronze ownership
+│   └── Production/              # Product/Production Bronze ownership
+└── utils/                       # Logger, helpers
+
+scripts/
+├── source/                      # Extraction / profiling from the source system
+├── ingestion/                   # Operational ingestion wrappers
+├── transformation/              # Silver transformations
+└── warehouse/                   # PostgreSQL schema, DDL, Gold adapters
+
+tests/                           # 47 test files — contract, unit, integration
+docs/                            # Architecture, execution evidence, project notes
+notebooks/                       # Exploratory and analytical notebooks
+Dashboard/                       # Dashboard assets and preview image
+docker-compose.yml               # Local PostgreSQL warehouse
+requirements.txt                 # Python dependencies
 ```
-
-`full` runs Bronze -> Silver -> Gold. Standalone `silver` requires `--recovery-snapshot` containing an explicit Bronze snapshot; standalone `gold` requires `--source-snapshot-id`. The runner returns `SUCCESS`, `SUCCESS_WITH_REJECTIONS`, `PARTIAL_SUCCESS`, or `FAILED`; the CLI maps those statuses to process exit codes and is the only layer that writes reports. Exit code `0` is reserved for `SUCCESS` and `SUCCESS_WITH_REJECTIONS`; report delivery failures are non-zero.
-
-## Tests and CI
-
-Run tests that do not require external databases with:
-
-```text
-python -m pytest -m "not integration" -q
-```
-
-Tests requiring SQL Server or PostgreSQL carry the `integration` marker. CI runs unit tests, Black, Flake8, and MyPy checks, then runs the integration lane only after checking its database prerequisites. Unavailable integration services are recorded as blocked evidence rather than reported as application success. CI retains test, quality, and prerequisite diagnostics as artifacts.
-
-Bootstrap owns schema creation and readiness. PostgreSQL services validate/use dependencies but do not create ingestion metadata in their constructors. For recovery, inspect the JSON report, repair the failed dependency or staging state, and rerun with the same explicit snapshot input; published current pointers are preserved by the stage jobs.
-
-## Data Results by Layer
-
-| Layer | Role | Result |
-|---|---|---|
-| Bronze | Raw landing with audit and lineage | Source data, run/load staging, rejected-record evidence, and retry-safe publication |
-| Silver | Cleaning and standardization | Six analytical source tables with snapshot identity |
-| Gold | Analytical model | Five dimensions, `fact_sales`, KPIs, and versioned publication |
-| Dashboard | Consumption/reporting | Sales performance reporting from analytical output |
 
 ## Workflow overview
 
@@ -201,109 +225,180 @@ flowchart TD
     AA -->|fail| AC[Keep previous Gold]
     AB --> R[PipelineRunner result]
 ```
-## Dashboard
 
-The dashboard is the final data consumption layer. It presents Sales Performance metrics to business users based on analytical tables validated in Silver/Gold.
+---
 
-![Sales Performance Dashboard](Dashboard/SalesPerformanceDashboard.png)
+### Shared Infrastructure (`src/shared/ingestion/`)
 
+This is a collection of reusable services injected into every domain job. Each service addresses a specific operational concern:
 
-## Repository Structure
+| File | Purpose |
+|---|---|
+| `audit_service.py` | Records complete pipeline run history in PostgreSQL: every run, table, and batch has its own record. If the pipeline crashes, its exact progress is known. |
+| `staging_manager.py` | New data is not written directly to the production table. It is written to a staging table first and swapped into place only after all validation passes. |
+| `quarantine_service.py` | A bad row (for example, a failed type cast or missing primary key) does not fail the whole batch. It is stored separately in `bronze.rejected_records` with the failure reason for later review. |
+| `checkpoint_manager.py` | Records the last successfully committed batch. If the pipeline is interrupted, the next run skips completed batches and resumes from where it stopped. |
+| `retry_policy.py` | Automatically retries up to 3 times with increasing delays for transient errors (such as intermittent database connections or timeouts) instead of failing immediately. |
+| `postgres_publish_service.py` | Publishes Silver by swapping staging data into the production table in a transaction, ensuring consumers always read a complete version and never partial data. |
+| `postgres_gold_publish_service.py` | Provides the same behavior for Gold: builds a candidate in a separate schema and updates the current pointer only after the candidate passes all validation. |
+| `postgres_gold_constraint_service.py` | Checks primary and foreign key constraints on the Gold candidate before publication. |
+| `postgres_gold_reconciliation_service.py` | Compares the Gold candidate with its Silver source to detect missing or extra rows. |
+| `ingestion_models.py` | Shared dataclass models: `RunAudit`, `TableLoadAudit`, `BatchLoadAudit`, `RejectedRecord`, and `TableSpec`. |
 
-```text
-src/
-├── app/                 # orchestration, pipeline runner, and snapshot gates
-├── core/                # settings and compatibility shells
-├── shared/              # connectors, ingestion contracts, and shared services
-├── features/
-│   ├── Sales_Performance/ # Sales Bronze/Silver/Gold and domain logic
-│   ├── Person/            # Person Bronze ownership
-│   └── Production/        # Product/Production Bronze ownership
-└── utils/               # logging and helper utilities
+---
 
-scripts/
-├── source/              # extraction/profiling from the source system
-├── ingestion/           # operational ingestion wrappers
-├── transformation/      # Silver transformations
-└── warehouse/           # PostgreSQL schema, DDL, and Gold adapters
+## Operational CLI
 
-tests/                   # contract, unit, and integration-oriented tests
-docs/                    # architecture, execution evidence, and project notes
-notebooks/               # exploratory and analytical notebooks
-Dashboard/               # dashboard assets and preview image
-docker-compose.yml       # local PostgreSQL warehouse
-main.py                  # application entry point
-requirements.txt         # Python dependencies
+Instead of `python main.py` (which runs the full pipeline with default settings), the CLI provides more precise control:
+
+```bash
+# Run the full pipeline (Bronze → Silver → Gold) and write a JSON report
+python -m src.app.cli --mode full --stage full --report logs/pipeline.json
+
+# Run Bronze only and write a Markdown report
+python -m src.app.cli --mode incremental --stage bronze --report logs/bronze.md --report-format markdown
+
+# Run Silver independently when Bronze data from a previous run is available (recovery)
+python -m src.app.cli --stage silver --recovery-snapshot logs/pipeline.json
+
+# Run Gold independently from a specific Silver snapshot
+python -m src.app.cli --stage gold --source-snapshot-id <snapshot_id>
 ```
+
+**Parameter descriptions:**
+
+- `--recovery-snapshot <file.json>`: Use this to rerun Silver without re-extracting Bronze. Pass the JSON report from the previous Bronze run; the pipeline reads its `snapshot_id` to determine which Bronze data to use.
+- `--source-snapshot-id <id>`: Use this when running Gold independently. Specify the `snapshot_id` of the published Silver data that Gold should read.
+
+**Result status meanings:**
+
+| Status | Meaning | Exit code |
+|---|---|---|
+| `SUCCESS` | The entire pipeline completed with no rejected rows | `0` |
+| `SUCCESS_WITH_REJECTIONS` | The pipeline completed, but some rows were quarantined (invalid data was isolated without failing the pipeline) | `0` |
+| `PARTIAL_SUCCESS` | Some stages completed and others were skipped | `2` |
+| `FAILED` | A stage failed and the pipeline stopped | `1` |
+
+> Exit code `0` is returned for both `SUCCESS` and `SUCCESS_WITH_REJECTIONS` because rejected rows are expected (source data can contain errors) and do not indicate a system failure. CI/CD scripts use the exit code to decide whether to continue. If writing the report fails (for example, because the disk is full or permission is denied), the exit code will be non-zero even if the pipeline itself succeeded.
+
+---
 
 ## Configuration and Runtime
 
-Settings are defined in [src/core/settings.py](src/core/settings.py), use `pydantic-settings`, and read `.env` and case-insensitive environment variables. Important defaults:
+All settings are read from `.env` (copy `.env.example` to get started). Key values:
 
-```text
-SQL Server: localhost:1433 / AdventureWorks2012 / Windows authentication
-PostgreSQL: localhost:5432 / adventureworks_warehouse
-batch_size: 10000
-retry_max_attempts: 3
-silver_rejected_threshold: 0
-silver_transform_version: silver-v1
+```ini
+# SQL Server — uses Windows Authentication; no username or password required
+SQL_SERVER_HOST=HELIOS\HELIOS
+SQL_SERVER_PORT=1433
+SQL_SERVER_DATABASE=AdventureWorks2012
+SQL_SERVER_AUTH_MODE=windows
+
+# PostgreSQL — runs locally through Docker Compose
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DATABASE=adventureworks_warehouse
+POSTGRES_USERNAME=postgres
+POSTGRES_PASSWORD=postgres
+
+# Pipeline settings
+BATCH_SIZE=10000
+RETRY_MAX_ATTEMPTS=3
 ```
 
-PostgreSQL is provisioned by `docker-compose.yml` and initializes the `bronze`, `bronze_staging`, `silver`, and `gold` schemas along with metadata tables. Docker Compose does not provision SQL Server or the source AdventureWorks database.
+**Security of `localhost:1433` and `localhost:5432`:**
 
-An important operational detail: some PostgreSQL-backed services may initialize the ingestion schema in their constructor. PostgreSQL must therefore be ready before creating the default `App`.
+Both are bound to `localhost`, meaning they **accept connections only from the machine running the pipeline** and are not exposed to external networks. This is a local development environment, not production. For deployment to a real server:
+- Replace `localhost` with an internal address (a private IP, not a public IP)
+- Use environment variables or a secrets manager instead of hardcoding secrets in `.env`
+- Replace the `postgres`/`postgres` password with strong credentials
+- Consider SSL/TLS for PostgreSQL connections
+
+Docker Compose initializes the PostgreSQL schemas `bronze`, `bronze_staging`, `silver`, and `gold`, along with metadata tables, on first startup (through `init-db.sql`).
+
+---
 
 ## Running the Application
 
-Use the repository-local Python environment:
+**Step 1 — Start the PostgreSQL warehouse (if it is not already running):**
+
+```powershell
+docker-compose up -d
+```
+
+**Step 2 — Activate the virtual environment:**
 
 ```powershell
 cd "A:\Workspace\DataEngineer\AdventureWorks Analytics Platform"
 .\.venv\Scripts\Activate.ps1
 ```
 
-Run the application:
+**Step 3 — Run the pipeline:**
 
 ```powershell
 python main.py
 ```
 
-Prerequisites:
+These three steps are all that is needed. There is no need to run migration or DDL scripts manually; `PlatformBootstrapJob` creates all schemas and metadata tables the first time the pipeline runs, using `init-db.sql` already loaded by Docker Compose.
 
-- Python 3.11 environment in `.venv`;
-- a running PostgreSQL warehouse;
-- SQL Server with the `AdventureWorks2012` database;
-- ODBC Driver 17 for SQL Server;
-- an `.env` configuration appropriate for the host.
+**Prerequisites:**
+
+- Python 3.11 with dependencies installed in `.venv` (`pip install -r requirements.txt`)
+- Docker Desktop running (for PostgreSQL)
+- SQL Server with the `AdventureWorks2012` database accessible
+- ODBC Driver 17 for SQL Server installed
+- `.env` created and configured according to `.env.example`
+
+---
 
 ## Testing
 
-Run the full regression suite:
+**Unit tests — no database required; can run offline:**
+
+```powershell
+python -m pytest -m "not integration" -q
+```
+
+Unit tests use mocks and in-memory objects instead of a real database. For example:
+- `AuditService` (in-memory) instead of `PostgresAuditService` (writes to the database)
+- `QuarantineService` (in-memory list) instead of `PostgresQuarantineService` (writes to `bronze.rejected_records`)
+- Pipeline logic, transformation rules, KPI formulas, and retry behavior can all be tested without a database
+
+Unit tests verify:
+- Transformation logic (for example, date casting and null handling)
+- Whether rejected rows are quarantined correctly
+- Whether retries occur the expected number of times
+- Whether Gold KPIs are calculated according to their formulas
+- Whether stage gates block execution when Bronze is incomplete
+
+**Integration tests — require live SQL Server and PostgreSQL instances:**
 
 ```powershell
 python -m pytest -q
 ```
 
-The main test groups cover:
+Tests marked `@pytest.mark.integration` connect to the databases, read and write data, and verify end-to-end behavior. CI runs this test lane only when the database prerequisites are available.
 
-- settings and architecture contracts;
-- Bronze extraction, staging, audit, quarantine, retry, checkpoint, and publication;
-- Silver transformation, rejection, deduplication, and publication gating;
-- Gold builders, fact grain, validation, KPIs, constraints, retries, reruns, and publication preservation;
-- connector and PostgreSQL integration behavior when the database environment is available.
+**47 test files** cover: architecture contracts; Bronze (extraction, staging, audit, quarantine, retry, checkpoint, publication, resume); Silver (transformation, rejection, deduplication, gating); and Gold (builders, grain, validation, KPIs, constraints, retry, reruns, publication preservation).
+
+---
 
 ## Validation Status
 
-- Phase 4A foundation: implemented.
-- Phase 4B Bronze runtime: implemented with persistent audit/quarantine, staging, retry/reconciliation, and atomic publication.
-- Phase 4C Silver runtime: implemented with chunked deterministic processing, validation, deduplication, checkpoints, and a publication gate.
-- Phase 4D Gold runtime: implemented with an injectable job, Silver snapshot gate, candidate staging, integrity/KPI validation, constraint verification, and atomic publication.
-- Phase 4E focused delivery tests: 16 passed.
-- Unit selection: 182 passed, 22 deselected with `-m "not integration"`.
-- Focused Phase 4E delivery tests: 24 passed.
-- Repository regression: 204 passed in the latest validation run.
+| Phase | Description | Status |
+|---|---|---|
+| Phase 4A | Foundation: injectable services, pydantic-settings, TableSpec, result model | ✅ Done |
+| Phase 4B | Bronze runtime: audit, quarantine, staging, retry/reconciliation, atomic publication | ✅ Done |
+| Phase 4C | Silver runtime: chunked processing, validation, deduplication, checkpoints, publication gate | ✅ Done |
+| Phase 4D | Gold runtime: injectable job, Silver snapshot gate, candidate staging, KPI/constraint validation, atomic publication | ✅ Done |
+| Phase 4E | CLI + focused delivery tests | ✅ Done |
 
+**Latest test results:** **204 tests passed**
 
-## Notes
+---
 
-This repository is independent of the workspace-level legacy Python directory. The remaining compatibility shells only support old imports and entry points; the current source of truth is in `src/app`, `src/shared`, and `src/features`.
+## Dashboard
+
+The dashboard is the final data consumption layer. It presents Sales Performance metrics to business users based on analytical tables validated in Silver/Gold.
+
+![Sales Performance Dashboard](Dashboard/SalesPerformanceDashboard.png)
