@@ -25,7 +25,6 @@ jobs:
 
   quality:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,6 +43,9 @@ jobs:
           python -m mypy src 2>&1 | tee mypy.log
           mypy_status=${PIPESTATUS[0]}
           printf 'black=%s flake8=%s mypy=%s\n' "$black_status" "$flake8_status" "$mypy_status" | tee quality-status.txt
+          if (( black_status != 0 || flake8_status != 0 || mypy_status != 0 )); then
+            exit 1
+          fi
           exit 0
       - name: Upload quality reports
         if: always()
@@ -56,22 +58,15 @@ jobs:
             mypy.log
             quality-status.txt
 
-  integration:
+  integration-postgres:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:15-alpine
-        env:
-          POSTGRES_DB: adventureworks_warehouse
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d adventureworks_warehouse"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    env:
+      ENVIRONMENT: test
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: 55432
+      POSTGRES_DATABASE: adventureworks_test
+      POSTGRES_USERNAME: postgres
+      POSTGRES_PASSWORD: integration_test_password
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -79,78 +74,63 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Check integration prerequisites
-        id: prerequisites
-        continue-on-error: true
-        shell: bash
-        env:
-          POSTGRES_HOST: localhost
-          POSTGRES_PORT: 5432
-          POSTGRES_DATABASE: adventureworks_warehouse
-          POSTGRES_USERNAME: postgres
-          POSTGRES_PASSWORD: postgres
-        run: |
-          set +e
-          python - <<'PY' 2>&1 | tee integration-prerequisites.log
-          import os
-          import sys
-          import psycopg2
-          import pyodbc
-
-          failures = []
-          try:
-              connection = psycopg2.connect(
-                  host=os.environ["POSTGRES_HOST"],
-                  port=os.environ["POSTGRES_PORT"],
-                  database=os.environ["POSTGRES_DATABASE"],
-                  user=os.environ["POSTGRES_USERNAME"],
-                  password=os.environ["POSTGRES_PASSWORD"],
-              )
-              connection.close()
-              print("postgres: available")
-          except Exception as exc:
-              failures.append(f"postgres: {type(exc).__name__}")
-              print(failures[-1])
-
-          sql_server_host = os.getenv("SQL_SERVER_HOST")
-          if not sql_server_host:
-              failures.append("sql_server: SQL_SERVER_HOST is not configured")
-              print(failures[-1])
-          else:
-              try:
-                  connection = pyodbc.connect(
-                      "Driver={%s};Server=%s;Database=%s;Trusted_Connection=yes;"
-                      % (
-                          os.getenv("SQL_SERVER_DRIVER", "ODBC Driver 17 for SQL Server"),
-                          sql_server_host,
-                          os.getenv("SQL_SERVER_DATABASE", "AdventureWorks2012"),
-                      ),
-                      timeout=5,
-                  )
-                  connection.close()
-                  print("sql_server: available")
-              except Exception as exc:
-                  failures.append(f"sql_server: {type(exc).__name__}")
-                  print(failures[-1])
-
-          sys.exit(1 if failures else 0)
-          PY
-          exit ${PIPESTATUS[0]}
-      - name: Run integration tests
-        if: steps.prerequisites.outcome == 'success'
-        run: python -m pytest -m integration -q --junitxml=integration-test-results.xml
-      - name: Record blocked integration evidence
-        if: steps.prerequisites.outcome != 'success'
-        run: printf 'Integration job blocked because one or more external prerequisites are unavailable.\n' > integration-blocked.txt
-      - name: Upload integration evidence
+      - name: Start isolated PostgreSQL integration database
+        run: docker compose -p adventureworks-ci-integration -f docker-compose.integration.yml up -d --wait
+      - name: Run PostgreSQL integration tests
+        run: python -m pytest -m "postgres_integration and not sqlserver_integration" -q --junitxml=postgres-integration-results.xml
+      - name: Upload PostgreSQL integration evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: integration-evidence
-          path: |
-            integration-prerequisites.log
-            integration-test-results.xml
-            integration-blocked.txt
-      - name: Fail when integration prerequisites are unavailable
-        if: always() && steps.prerequisites.outcome != 'success'
-        run: exit 1
+          name: postgres-integration-evidence
+          path: postgres-integration-results.xml
+      - name: Stop isolated PostgreSQL integration database
+        if: always()
+        run: docker compose -p adventureworks-ci-integration -f docker-compose.integration.yml down -v
+
+  integration-sqlserver:
+    if: ${{ vars.SQL_SERVER_HOST != '' }}
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: test
+      SQL_SERVER_HOST: ${{ vars.SQL_SERVER_HOST }}
+      SQL_SERVER_PORT: ${{ vars.SQL_SERVER_PORT || '1433' }}
+      SQL_SERVER_DATABASE: ${{ vars.SQL_SERVER_DATABASE || 'AdventureWorks2012' }}
+      SQL_SERVER_AUTH_MODE: sql
+      SQL_SERVER_USERNAME: ${{ secrets.SQL_SERVER_USERNAME }}
+      SQL_SERVER_PASSWORD: ${{ secrets.SQL_SERVER_PASSWORD }}
+      SQL_SERVER_DRIVER: ODBC Driver 18 for SQL Server
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: 55432
+      POSTGRES_DATABASE: adventureworks_test
+      POSTGRES_USERNAME: postgres
+      POSTGRES_PASSWORD: integration_test_password
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Microsoft ODBC Driver 18
+        shell: bash
+        run: |
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+            | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc > /dev/null
+          curl -fsSL https://packages.microsoft.com/config/ubuntu/24.04/prod.list \
+            | sudo tee /etc/apt/sources.list.d/mssql-release.list > /dev/null
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Start isolated PostgreSQL integration database
+        run: docker compose -p adventureworks-ci-sqlserver -f docker-compose.integration.yml up -d --wait
+      - name: Run SQL Server integration tests
+        run: python -m pytest -m sqlserver_integration -q --junitxml=sqlserver-integration-results.xml
+      - name: Upload SQL Server integration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlserver-integration-evidence
+          path: sqlserver-integration-results.xml
+      - name: Stop isolated PostgreSQL integration database
+        if: always()
+        run: docker compose -p adventureworks-ci-sqlserver -f docker-compose.integration.yml down -v

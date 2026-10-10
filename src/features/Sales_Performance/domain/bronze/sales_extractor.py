@@ -21,7 +21,12 @@ class SalesExtractor:
         self.source_system = source_system
         self.settings = settings or get_settings()
 
-    def extract_table(self, source_schema: str, source_table: str, load_date: Optional[datetime] = None):
+    def extract_table(
+        self,
+        source_schema: str,
+        source_table: str,
+        load_date: Optional[datetime] = None,
+    ):
         legacy_spec = TableSpec(
             source_schema=source_schema,
             source_table=source_table,
@@ -51,14 +56,15 @@ class SalesExtractor:
         if load_date is None:
             load_date = datetime.now()
 
-        if not legacy_query and spec.ordering_key is None:
+        if spec.ordering_key is None:
             raise ValueError("TableSpec ordering_key is required for batch extraction")
+        ordering_key = spec.ordering_key
 
         query = f"SELECT * FROM {spec.source_name}"
         if not legacy_query:
             if start_after is not None:
-                query += f" WHERE {spec.ordering_key} > ?"
-            query += f" ORDER BY {spec.ordering_key}"
+                query += f" WHERE {ordering_key} > ?"
+            query += f" ORDER BY {ordering_key}"
 
         with SQLServerConnector(settings=self.settings) as sql_conn:
             cursor = sql_conn.connection.cursor()
@@ -66,7 +72,9 @@ class SalesExtractor:
                 if hasattr(cursor, "timeout"):
                     cursor.timeout = self.settings.bronze_query_timeout_seconds
                 elif hasattr(sql_conn.connection, "timeout"):
-                    sql_conn.connection.timeout = self.settings.bronze_query_timeout_seconds
+                    sql_conn.connection.timeout = (
+                        self.settings.bronze_query_timeout_seconds
+                    )
                 if start_after is None:
                     cursor.execute(query)
                 else:
@@ -80,19 +88,24 @@ class SalesExtractor:
                     normalized_rows = [tuple(row) for row in rows]
                     df = pd.DataFrame(normalized_rows, columns=columns)
                     self._add_lineage(df, spec.source_name, load_date)
-                    lower_bound, upper_bound = self._batch_bounds(df, spec.ordering_key)
+                    lower_bound, upper_bound = self._batch_bounds(df, ordering_key)
                     yield ExtractionBatch(df, batch_number, lower_bound, upper_bound)
                     batch_number += 1
             finally:
                 cursor.close()
 
-    def _add_lineage(self, df: pd.DataFrame, source_table: str, load_date: datetime) -> None:
+    def _add_lineage(
+        self, df: pd.DataFrame, source_table: str, load_date: datetime
+    ) -> None:
         df["_source_system"] = self.source_system
         df["_source_table"] = source_table
         df["_load_date"] = load_date
 
         def compute_record_hash(row: pd.Series) -> str:
-            payload = row.drop(labels=["_source_system", "_source_table", "_load_date"], errors="ignore").to_dict()
+            payload = row.drop(
+                labels=["_source_system", "_source_table", "_load_date"],
+                errors="ignore",
+            ).to_dict()
             normalized = json.dumps(payload, default=str, sort_keys=True)
             return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 

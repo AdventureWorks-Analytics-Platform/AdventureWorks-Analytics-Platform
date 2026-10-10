@@ -8,9 +8,7 @@ class PostgresReconciliationService:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
 
-    def resolve(
-        self, staging_name: str, batch_id: str, content_hash: str
-    ) -> str:
+    def resolve(self, staging_name: str, batch_id: str, content_hash: str) -> str:
         del staging_name
         with PostgreSQLConnector(settings=self.settings) as connection:
             rows = connection.fetch_results(

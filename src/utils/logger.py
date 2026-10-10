@@ -1,45 +1,43 @@
-# Logging configuration for AdventureWorks Analytics Platform
-
-"""
-Centralized logging configuration.
-"""
-
 import logging
 import os
+from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-LOG_DIR = 'logs'
+from src.shared.observability.structured_logging import JsonLineFormatter
 
-# Create logs directory if it doesn't exist
-os.makedirs(LOG_DIR, exist_ok=True)
+
+LOG_DIR = Path("logs")
 
 
 def setup_logging(name: str) -> logging.Logger:
-    """Set up logging configuration."""
+    """Set up idempotent JSON console and rotating-file logging for one logger."""
     logger = logging.getLogger(name)
-    logger.setLevel(getattr(logging, LOG_LEVEL))
-    
-    # Console handler
+    level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO"))
+    logger.setLevel(level)
+    if any(
+        getattr(handler, "_adventureworks_json_handler", False)
+        for handler in logger.handlers
+    ):
+        return logger
+
+    formatter = JsonLineFormatter()
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(getattr(logging, LOG_LEVEL))
-    console_format = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    console_handler.setFormatter(console_format)
-    logger.addHandler(console_handler)
-    
-    # File handler with rotation
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
+    setattr(console_handler, "_adventureworks_json_handler", True)
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
     file_handler = RotatingFileHandler(
-        f'{LOG_DIR}/adventureworks.log',
-        maxBytes=10485760,  # 10MB
-        backupCount=5
+        LOG_DIR / "adventureworks.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
     )
-    file_handler.setLevel(getattr(logging, LOG_LEVEL))
-    file_format = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
-    )
-    file_handler.setFormatter(file_format)
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
+    setattr(file_handler, "_adventureworks_json_handler", True)
+    logger.addHandler(console_handler)
     logger.addHandler(file_handler)
-    
+    logger.propagate = False
+
     return logger

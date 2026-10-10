@@ -30,7 +30,9 @@ class CheckpointManager:
     def get(self, batch_id: str) -> Checkpoint | None:
         return self._checkpoints.get(batch_id)
 
-    def latest_for_load(self, batch_ids: list[str] | tuple[str, ...]) -> Checkpoint | None:
+    def latest_for_load(
+        self, batch_ids: list[str] | tuple[str, ...]
+    ) -> Checkpoint | None:
         for batch_id in reversed(batch_ids):
             checkpoint = self.get(batch_id)
             if checkpoint is not None:
@@ -42,7 +44,11 @@ class PostgresCheckpointManager:
     """Persist checkpoints using the transaction supplied by the data writer."""
 
     def advance_in_transaction(
-        self, connection, batch_id: str, upper_bound: Any, content_hash: str | None = None
+        self,
+        connection,
+        batch_id: str,
+        upper_bound: Any,
+        content_hash: str | None = None,
     ) -> Checkpoint:
         connection.execute(
             text(
@@ -88,7 +94,9 @@ class PostgresCheckpointManager:
             )
         return Checkpoint(*rows[0]) if rows else None
 
-    def latest_for_load(self, batch_ids: list[str] | tuple[str, ...]) -> Checkpoint | None:
+    def latest_for_load(
+        self, batch_ids: list[str] | tuple[str, ...]
+    ) -> Checkpoint | None:
         for batch_id in reversed(batch_ids):
             checkpoint = self.get(batch_id)
             if checkpoint is not None:

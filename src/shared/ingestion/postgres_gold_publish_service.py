@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import re
 import json
+import re
 from typing import Any, Mapping
-
-from psycopg2 import sql
 
 from src.core.settings import Settings, get_settings
 from src.shared.connectors.postgres_connector import PostgreSQLConnector
-from src.shared.ingestion.postgres_gold_constraint_service import (
-    PostgresGoldConstraintError,
-)
 from src.shared.ingestion.ingestion_models import utc_now
 
 
@@ -28,10 +23,16 @@ class PostgresGoldPublicationError(RuntimeError):
 class PostgresGoldPublishService:
     """Atomically update the Gold current pointer without replacing Gold tables."""
 
-    required_tables = frozenset({
-        "dim_date", "dim_customer", "dim_product", "dim_territory",
-        "dim_salesperson", "fact_sales",
-    })
+    required_tables = frozenset(
+        {
+            "dim_date",
+            "dim_customer",
+            "dim_product",
+            "dim_territory",
+            "dim_salesperson",
+            "fact_sales",
+        }
+    )
 
     def __init__(self, settings: Settings | None = None, connector_factory=None):
         self.settings = settings or get_settings()
@@ -53,7 +54,9 @@ class PostgresGoldPublishService:
         self._validate_identifier(candidate_schema)
         self._validate_version(gold_version)
         if candidate.get("source_snapshot_id") != source_snapshot_id:
-            raise PostgresGoldPublicationError("candidate source snapshot does not match publish request")
+            raise PostgresGoldPublicationError(
+                "candidate source snapshot does not match publish request"
+            )
 
         connector = self.connector_factory(settings=self.settings)
         try:
@@ -66,8 +69,34 @@ class PostgresGoldPublishService:
                     )
                     self._ensure_pointer_table(cursor)
                     self._ensure_audit_table(cursor)
-                    self._assert_candidate(cursor, candidate_schema)
                     previous = self._current_pointer(cursor)
+                    existing = self._existing_publication(cursor, gold_run_id)
+                    if existing is not None:
+                        if (
+                            existing["gold_version"] != gold_version
+                            or existing["candidate_schema"] != candidate_schema
+                            or existing["source_snapshot_id"] != source_snapshot_id
+                        ):
+                            raise PostgresGoldPublicationError(
+                                "Gold run identity was already published with a "
+                                "different candidate"
+                            )
+                        current_pointer = self._pointer_dict(previous)
+                        publication = {
+                            "gold_version": existing["gold_version"],
+                            "candidate_schema": existing["candidate_schema"],
+                            "source_snapshot_id": existing["source_snapshot_id"],
+                            "gold_run_id": gold_run_id,
+                            "previous_version": existing["previous_version"],
+                        }
+                        return {
+                            **publication,
+                            "current_pointer": current_pointer,
+                            "published": True,
+                            "audit_id": existing["audit_id"],
+                        }
+
+                    self._assert_candidate(cursor, candidate_schema)
                     self._write_pointer(
                         cursor,
                         gold_version=gold_version,
@@ -95,7 +124,9 @@ class PostgresGoldPublishService:
                         "candidate_schema": candidate_schema,
                         "source_snapshot_id": source_snapshot_id,
                         "gold_run_id": gold_run_id,
-                        "previous_version": previous["gold_version"] if previous else None,
+                        "previous_version": (
+                            previous["gold_version"] if previous else None
+                        ),
                     }
                     return {
                         **current_pointer,
@@ -193,11 +224,19 @@ class PostgresGoldPublishService:
     ):
         counts = dict(counts or {})
         tables = candidate.get("tables", {})
-        fact_rows = int(counts.get("fact_rows", tables.get("fact_sales", {}).get("rows", 0)))
-        dimension_rows = int(counts.get(
-            "dimension_rows",
-            sum(meta.get("rows", 0) for name, meta in tables.items() if name != "fact_sales"),
-        ))
+        fact_rows = int(
+            counts.get("fact_rows", tables.get("fact_sales", {}).get("rows", 0))
+        )
+        dimension_rows = int(
+            counts.get(
+                "dimension_rows",
+                sum(
+                    meta.get("rows", 0)
+                    for name, meta in tables.items()
+                    if name != "fact_sales"
+                ),
+            )
+        )
         rows_written = int(counts.get("rows_written", dimension_rows + fact_rows))
         rows_read = int(counts.get("rows_read", rows_written))
         rows_rejected = int(counts.get("rows_rejected", 0))
@@ -218,15 +257,25 @@ class PostgresGoldPublishService:
             ) RETURNING audit_id
             """,
             (
-                gold_run_id, gold_version, candidate_schema, source_snapshot_id,
-                previous_version, "PUBLISHED", True,
+                gold_run_id,
+                gold_version,
+                candidate_schema,
+                source_snapshot_id,
+                previous_version,
+                "PUBLISHED",
+                True,
                 validation_report.get("validation_passed", True),
                 constraint_report.get("constraints_verified", True),
-                kpi_report.get("kpi_passed", True), rows_read, rows_written,
-                rows_rejected, dimension_rows, fact_rows,
+                kpi_report.get("kpi_passed", True),
+                rows_read,
+                rows_written,
+                rows_rejected,
+                dimension_rows,
+                fact_rows,
                 json.dumps(validation_report, default=str),
                 json.dumps(constraint_report, default=str),
-                json.dumps(kpi_report, default=str), utc_now(),
+                json.dumps(kpi_report, default=str),
+                utc_now(),
             ),
         )
         return cursor.fetchone()[0]
@@ -234,8 +283,8 @@ class PostgresGoldPublishService:
     @staticmethod
     def _current_pointer(cursor) -> dict[str, Any] | None:
         cursor.execute(
-            f"SELECT gold_version, candidate_schema, source_snapshot_id, gold_run_id "
-            f"FROM gold.{POINTER_TABLE} WHERE pointer_id = 1 FOR UPDATE"
+            f"SELECT gold_version, candidate_schema, source_snapshot_id, gold_run_id, "
+            f"previous_version FROM gold.{POINTER_TABLE} WHERE pointer_id = 1 FOR UPDATE"
         )
         row = cursor.fetchone()
         if row is None:
@@ -245,7 +294,38 @@ class PostgresGoldPublishService:
             "candidate_schema": row[1],
             "source_snapshot_id": row[2],
             "gold_run_id": row[3],
+            "previous_version": row[4],
         }
+
+    @staticmethod
+    def _existing_publication(cursor, gold_run_id: str) -> dict[str, Any] | None:
+        cursor.execute(
+            """
+            SELECT gold_version, candidate_schema, source_snapshot_id,
+                   previous_version, audit_id
+            FROM gold.gold_publication_audit
+            WHERE gold_run_id = %s
+            ORDER BY audit_id
+            LIMIT 1
+            """,
+            (gold_run_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "gold_version": row[0],
+            "candidate_schema": row[1],
+            "source_snapshot_id": row[2],
+            "previous_version": row[3],
+            "audit_id": row[4],
+        }
+
+    @staticmethod
+    def _pointer_dict(pointer: dict[str, Any] | None) -> dict[str, Any] | None:
+        if pointer is None:
+            return None
+        return dict(pointer)
 
     @staticmethod
     def _write_pointer(
@@ -272,15 +352,21 @@ class PostgresGoldPublishService:
                 published_at = EXCLUDED.published_at
             """,
             (
-                gold_version, candidate_schema, source_snapshot_id,
-                gold_run_id, previous_version, utc_now(),
+                gold_version,
+                candidate_schema,
+                source_snapshot_id,
+                gold_run_id,
+                previous_version,
+                utc_now(),
             ),
         )
 
     @staticmethod
     def _validate_identifier(identifier: str) -> None:
         if not _IDENTIFIER.fullmatch(identifier):
-            raise PostgresGoldPublicationError(f"unsafe candidate schema: {identifier!r}")
+            raise PostgresGoldPublicationError(
+                f"unsafe candidate schema: {identifier!r}"
+            )
 
     @staticmethod
     def _validate_version(version: str) -> None:

@@ -5,6 +5,7 @@ import psycopg2
 
 from src.core.settings import Settings, get_settings
 from src.shared.connectors.base_connector import BaseConnector
+from src.shared.observability.structured_logging import emit_event
 
 logger = logging.getLogger(__name__)
 
@@ -30,15 +31,24 @@ class PostgreSQLConnector(BaseConnector):
                 user=self.username,
                 password=self.password,
             )
-            logger.info("Connected to PostgreSQL: %s/%s", self.host, self.database)
+            emit_event(
+                logger,
+                logging.INFO,
+                "adapter.connected",
+                adapter="postgresql",
+                operation="connect",
+                status="SUCCESS",
+            )
             return True
         except Exception as exc:  # pragma: no cover - logging branch
-            logger.error(
-                "Failed to connect to PostgreSQL at %s:%s/%s (%s)",
-                self.host,
-                self.port,
-                self.database,
-                type(exc).__name__,
+            emit_event(
+                logger,
+                logging.ERROR,
+                "adapter.failed",
+                adapter="postgresql",
+                operation="connect",
+                status="FAILED",
+                error_type=type(exc).__name__,
             )
             self.connection = None
             return False
@@ -49,10 +59,25 @@ class PostgreSQLConnector(BaseConnector):
                 try:
                     self.connection.rollback()
                 except Exception:  # pragma: no cover - defensive cleanup
-                    logger.warning("PostgreSQL rollback during disconnect failed")
+                    emit_event(
+                        logger,
+                        logging.WARNING,
+                        "adapter.failed",
+                        adapter="postgresql",
+                        operation="rollback_on_disconnect",
+                        status="FAILED",
+                        error_type="RollbackError",
+                    )
             self.connection.close()
             self.connection = None
-            logger.info("Disconnected from PostgreSQL")
+            emit_event(
+                logger,
+                logging.INFO,
+                "adapter.disconnected",
+                adapter="postgresql",
+                operation="disconnect",
+                status="SUCCESS",
+            )
 
     def execute_query(self, query: str, params: Optional[tuple] = None):
         if not self.connection:

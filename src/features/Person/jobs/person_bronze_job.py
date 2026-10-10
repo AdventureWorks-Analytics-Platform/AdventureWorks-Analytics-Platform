@@ -1,20 +1,29 @@
 from src.core.settings import Settings
 from src.features.Sales_Performance.domain.bronze.bronze_loader import BronzeLoader
-from src.features.Sales_Performance.domain.bronze.bronze_validator import BronzeValidator
+from src.features.Sales_Performance.domain.bronze.bronze_validator import (
+    BronzeValidator,
+)
 from src.features.Sales_Performance.domain.bronze.sales_extractor import SalesExtractor
 from src.shared.ingestion.domain_bronze_job import DomainBronzeJob
 from src.shared.ingestion.ingestion_models import TableSpec
 from src.shared.ingestion.audit_service import PostgresAuditService
 from src.shared.ingestion.quarantine_service import PostgresQuarantineService
 from src.shared.ingestion.postgres_publish_service import PostgresPublishService
-from src.shared.ingestion.postgres_reconciliation_service import PostgresReconciliationService
+from src.shared.ingestion.postgres_reconciliation_service import (
+    PostgresReconciliationService,
+)
 from src.shared.ingestion.checkpoint_manager import PostgresCheckpointManager
 
 
 PERSON_TABLE_SPECS = (
     TableSpec(
-        "Person", "Person", "bronze", "person",
-        "BusinessEntityID", ("BusinessEntityID",), "BusinessEntityID",
+        "Person",
+        "Person",
+        "bronze",
+        "person",
+        "BusinessEntityID",
+        ("BusinessEntityID",),
+        "BusinessEntityID",
     ),
 )
 

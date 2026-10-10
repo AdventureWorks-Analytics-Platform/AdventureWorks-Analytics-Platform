@@ -33,10 +33,11 @@ python -m pytest -m "not integration" -q
 Result:
 
 ```text
-182 passed, 22 deselected
+211 passed, 33 deselected
 ```
 
-The 22 deselected tests are explicitly marked `integration` and require PostgreSQL and/or SQL Server.
+The 33 deselected tests are explicitly marked `integration` and require
+PostgreSQL and/or SQL Server.
 
 ## Focused Delivery Tests
 
@@ -54,19 +55,23 @@ Result:
 
 Coverage includes CLI option validation, status-to-exit-code mapping, JSON/Markdown rendering, report metadata, invalid recovery input, and report-delivery failure.
 
-## Full Regression
+## Current Split Integration Evidence
 
-Command:
+PostgreSQL-only command:
 
 ```powershell
-python -m pytest -q
+python -m pytest -m "postgres_integration and not sqlserver_integration" -q
 ```
 
 Result:
 
 ```text
-204 passed
+29 passed, 215 deselected
 ```
+
+SQL Server selection was verified to contain four tests. Execution requires a
+configured AdventureWorks SQL Server source; it was not run as part of this
+local PostgreSQL validation.
 
 ## Static Checks
 
@@ -76,21 +81,34 @@ compileall: PASS
 git diff --check: PASS
 ```
 
-The broader repository Black and Flake8 baseline contains pre-existing formatting and lint debt. CI runs those checks and retains their logs as artifacts, but the quality lane is currently informational/non-blocking until that baseline is reduced.
-
-Current quality command results:
+The earlier non-blocking quality baseline has been remediated. Current quality
+commands all pass and the CI quality job is now blocking:
 
 ```text
-Black: fails; 37 files would be reformatted
-Flake8: fails on existing E501 and related baseline issues
-MyPy: fails with 102 existing/type-stub errors across 22 files
+Black --check: PASS (63 files)
+Flake8: PASS
+MyPy: PASS (56 source files)
+Unit tests: 211 passed, 33 deselected
 ```
 
-The checks are present and executed by CI; these failures are recorded blockers for making the quality lane required.
+Structured logging uses the shared JSON event contract in
+`src/shared/observability/structured_logging.py`. Pipeline, Bronze, Silver,
+Gold, PostgreSQL, and SQL Server boundaries emit correlated lifecycle,
+table, batch, retry, and adapter events. Focused tests verify event fields,
+pipeline correlation, and rejection of unapproved payload fields.
 
 ## Integration and CI Policy
 
-The CI integration lane provisions PostgreSQL, checks PostgreSQL and SQL Server prerequisites, runs marked integration tests only when prerequisites are available, and uploads prerequisite/test logs. Missing external services produce blocked/non-success evidence and are not reported as application success.
+Integration coverage is split by dependency. The verified PostgreSQL lane uses an
+ephemeral PostgreSQL 15 database initialized from the warehouse schema script
+and runs `postgres_integration` tests independently of SQL Server. The
+SQL Server lane is enabled only when `SQL_SERVER_HOST` is configured and runs
+`sqlserver_integration` tests using the configured AdventureWorks source.
+
+See [INTEGRATION_TESTING.md](INTEGRATION_TESTING.md) for local setup and CI
+configuration. SQL Server coverage remains conditional on an external source
+database; its absence does not block the independently reproducible
+PostgreSQL lane.
 
 ## Result Contract Closure
 

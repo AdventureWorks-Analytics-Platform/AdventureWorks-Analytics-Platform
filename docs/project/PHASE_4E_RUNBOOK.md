@@ -37,6 +37,25 @@ For Gold failures, preserve the previous `gold_current_pointer` version. For Sil
 
 JSON and Markdown reports are written to the path supplied with `--report`. The JSON report is the machine-readable source and includes `run_id`, `status`, `failed_stage`, stage results, counts, report schema version, and report paths. Use the `run_id` with the Bronze audit/reconciliation records when investigating a failed stage. A report write failure returns a non-zero exit code and must be treated as a delivery failure even when data stages completed.
 
+## Structured operational logs
+
+The CLI writes one JSON object per log line to the console and the rotating
+`logs/adventureworks.log` file. Pipeline and job events use `event`, `timestamp`,
+`level`, `run_id`, `stage`, and `status`; table and batch events also include
+their applicable source/target, identity, attempt, duration, and row counts.
+Adapter events identify the adapter and operation. Use `run_id` to correlate
+events with the JSON report and durable audit records.
+
+Example batch event:
+
+```json
+{"timestamp":"2026-10-10T08:43:17.228Z","level":"INFO","event":"batch.completed","run_id":"run-7f2a","load_id":"load-a814","batch_id":"batch-004","stage":"silver","source_table":"bronze.sales_order_detail","target_table":"silver.sales_order_detail_clean","attempt":1,"rows_read":10000,"rows_written":9987,"rows_rejected":13,"duration_ms":842,"status":"SUCCESS_WITH_REJECTIONS"}
+```
+
+Logs intentionally omit row payloads, connection strings, credentials, and raw
+exception messages. Detailed rejection/audit records remain in their existing
+quarantine and audit stores.
+
 Run unit tests with:
 
 ```text
@@ -45,4 +64,4 @@ python -m pytest -m "not integration" -q
 
 Database-backed tests are marked `integration` and require configured external services.
 
-CI separates unit and integration work. The unit lane runs `-m "not integration"` without external databases. The integration lane provisions PostgreSQL, checks PostgreSQL and SQL Server availability, and records unavailable prerequisites as a blocked/non-success result. Black, Flake8, and MyPy outputs are retained as CI artifacts; the current repository has pre-existing quality debt, so that quality lane is informational until the baseline is reduced.
+CI separates unit and integration work. The unit lane runs `-m "not integration"` without external databases. The integration lane provisions PostgreSQL, checks PostgreSQL and SQL Server availability, and records unavailable prerequisites as a blocked/non-success result. The quality lane runs Black, Flake8, and MyPy as blocking checks and retains their logs as artifacts.

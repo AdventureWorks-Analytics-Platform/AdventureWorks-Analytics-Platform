@@ -21,12 +21,21 @@ from src.features.Sales_Performance.jobs.sales_gold_job import (
 )
 
 __all__ = [
-    "SalesBronzeJob", "SalesBronzeIngestionJob", "SalesGoldJob",
-    "GoldTableSpec", "GOLD_TABLE_SPECS", "GoldExecutionIdentity",
-    "GoldConstraintManager", "GoldConstraintError",
-    "GoldPublishService", "GoldPublicationError", "GoldRunAlreadyActive",
+    "SalesBronzeJob",
+    "SalesBronzeIngestionJob",
+    "SalesGoldJob",
+    "GoldTableSpec",
+    "GOLD_TABLE_SPECS",
+    "GoldExecutionIdentity",
+    "GoldConstraintManager",
+    "GoldConstraintError",
+    "GoldPublishService",
+    "GoldPublicationError",
+    "GoldRunAlreadyActive",
     "UnknownCommitError",
     "GoldIntegrityValidator",
-    "GoldTableResult", "GoldRunResult", "SilverSnapshotGate",
+    "GoldTableResult",
+    "GoldRunResult",
+    "SilverSnapshotGate",
     "SilverSnapshotError",
 ]

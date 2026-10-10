@@ -98,7 +98,7 @@ A failed configuration, connectivity/readiness check, bootstrap, required Bronze
 
 ### 3.1 Confirmed implementation surface
 
-> **Runtime reconciliation (2026-09-07):** Phase 4E orchestration, bootstrap, CLI/report delivery, integration marker policy, and CI workflow are implemented and locally verified. Remaining production evidence is limited to external-service CI/integration availability and reducing the pre-existing quality baseline debt.
+> **Runtime reconciliation (2026-09-07):** Phase 4E orchestration, bootstrap, CLI/report delivery, integration marker policy, and CI workflow are implemented and locally verified. Remaining production evidence is limited to external-service integration availability.
 
 | Area | Current location | Current behavior | Phase 4E concern |
 |---|---|---|---|
@@ -110,7 +110,7 @@ A failed configuration, connectivity/readiness check, bootstrap, required Bronze
 | Gold | `src/features/Sales_Performance/jobs/sales_gold_job.py`, PostgreSQL Gold adapters | Injectable Gold job owns fact batches, validation, constraints, KPI, candidate schema, audit, and atomic current pointer | Phase 4E must invoke/evaluate Gold result without duplicating Gold mechanics |
 | Result contract | `src/shared/ingestion/ingestion_models.py` | Shared ingestion statuses and table result shape | Runner needs stage/pipeline result aggregation without losing table context |
 | Test configuration | `pytest.ini`, `tests/` | Registers `integration`; live SQL Server/PostgreSQL modules are marked and unit selection uses `-m "not integration"` | New database tests must carry the marker |
-| CI | `.github/workflows/ci.yml` | Unit, quality, and prerequisite-aware integration jobs retain logs/results as artifacts | Quality baseline remains non-blocking until existing debt is reduced; unavailable integration prerequisites are blocking evidence |
+| CI | `.github/workflows/ci.yml` | Unit, blocking quality, and prerequisite-aware integration jobs retain logs/results as artifacts | Black, Flake8, and MyPy are green and blocking; unavailable integration prerequisites remain explicit evidence |
 | Documentation | `README.md`, `docs/project/PHASE_4E_RUNBOOK.md`, `docs/project/PHASE_4E_EVIDENCE.md`, Phase 4 docs | One-command execution, recovery, exit codes, test selection, CI policy, and evidence are documented | Keep commands and evidence synchronized with runtime |
 
 ### 3.2 Falsifiable orchestration hypothesis
@@ -398,7 +398,7 @@ Phase 4E is complete only when all applicable items below have implementation an
 - [x] Exit code `0` is limited to `SUCCESS` and policy-approved `SUCCESS_WITH_REJECTIONS`; full-run `PARTIAL_SUCCESS` and `FAILED` are non-zero.
 - [x] JSON and Markdown summary reports are generated from one structured result, preserve Gold identity/version/pointer fields, and are redacted; delivery failure is non-success.
 - [x] Integration tests are marked and unit tests run without external services; unavailable integration prerequisites are explicit and block Production DoD.
-- [x] CI runs the agreed unit, lint, format, type-check, and integration-aware checks. Quality checks execute and upload logs; the current baseline is informational/non-blocking because Black/Flake8/MyPy still report pre-existing debt.
+- [x] CI runs the agreed unit, lint, format, type-check, and integration-aware checks. Black, Flake8, and MyPy pass as blocking checks; reports are uploaded as artifacts.
 - [x] README/runbook/checklist reflect actual commands, prerequisites, recovery, and evidence.
 
 Production DoD must not be inferred from a fake-stage success test alone. Health gating, bootstrap idempotency/version checks, failure sequencing, exit codes, report redaction, integration classification, and documentation/runtime agreement all require evidence.
@@ -435,6 +435,7 @@ Update this table after each task. A task may be marked `Done` only after implem
 | 2026-09-07 | Implement 6.5 integration markers and CI | `pytest.ini`, marked integration tests, `.github/workflows/ci.yml` | `python -m pytest -m "not integration" -q`; `python -m pytest -m integration -q` | `182 passed, 22 deselected`; integration `22 passed`. CI runs unit tests, quality checks, prerequisite-aware integration tests, and uploads diagnostics/results as artifacts. | Done |
 | 2026-09-07 | Close Gold result/report contract gaps | `src/shared/ingestion/postgres_gold_publish_service.py`, `src/features/Sales_Performance/jobs/sales_gold_job.py`, `src/app/pipeline_runner.py`, `tests/test_pipeline_runner.py` | `python -m pytest tests/test_pipeline_runner.py tests/test_pipeline_cli.py tests/test_gold_publish.py -q`; `python -m pytest -q` | `24 passed` focused; `204 passed` full suite. Gold `current_pointer` and lineage fields propagate to runner/report results; generic failures expose `error_message` with legacy `error` compatibility alias; top-level row counts are exposed. | Done |
 | 2026-09-07 | Verify Phase 4E Definition of Done | Unit, focused, integration, full, quality and compile commands | Unit `182 passed, 22 deselected`; focused `25 passed`; integration `22 passed, 182 deselected`; full `204 passed`; compile/diff pass. Black/Flake8/MyPy execute but report existing quality debt and remain informational in CI. | Done |
+| Current update | Remediate quality baseline and enforce CI | Black, Flake8, MyPy, non-integration tests | Black, Flake8, and MyPy pass; unit suite `211 passed, 33 deselected`; quality CI is blocking. | Done |
 | 2026-09-09 | Align `App.run()` compatibility status with CLI exit-code policy | `src/app/app.py`, `tests/test_app_bronze_to_silver.py` | `pytest tests/test_app_bronze_to_silver.py tests/test_pipeline_cli.py tests/test_pipeline_runner.py -q`; `pytest tests/ -q -m "not integration"` | Policy decided: `PARTIAL_SUCCESS` now maps to `degraded` (previously `ok`), matching the CLI's non-zero exit code for `PARTIAL_SUCCESS`; new focused test `test_app_partial_success_is_degraded_not_ok` added; 199 passed (198 + 1 new) | Done |
 
 ## 12. Related documents

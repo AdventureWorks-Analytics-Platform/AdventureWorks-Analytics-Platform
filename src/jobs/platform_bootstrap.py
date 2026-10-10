@@ -34,7 +34,9 @@ class PlatformBootstrapJob:
     def __init__(
         self,
         settings: Settings | None = None,
-        schema_ensurer: Callable[[Settings], None] = ensure_ingestion_schema,
+        schema_ensurer: Callable[
+            [Settings | None], dict[str, object]
+        ] = ensure_ingestion_schema,
         connector_factory: Callable[..., Any] = PostgreSQLConnector,
     ):
         self.settings = settings or get_settings()
@@ -64,7 +66,7 @@ class PlatformBootstrapJob:
                 )
                 metadata_rows = connection.fetch_results(
                     """
-                    SELECT object_name, object_type, EXISTS (
+                    SELECT required.table_name AS object_name, required.object_type, EXISTS (
                         SELECT 1
                         FROM information_schema.tables
                         WHERE table_schema = 'bronze'
@@ -95,7 +97,9 @@ class PlatformBootstrapJob:
             checks.extend(
                 {
                     "name": row[0],
-                    "category": "metadata" if row[0] != "platform_schema_version" else "version",
+                    "category": (
+                        "metadata" if row[0] != "platform_schema_version" else "version"
+                    ),
                     "status": "ok" if row[2] else "failed",
                     "reason": "object exists" if row[2] else "object is missing",
                 }
@@ -117,7 +121,11 @@ class PlatformBootstrapJob:
             )
             readiness = {
                 "phase": "post_bootstrap",
-                "status": "ready" if all(item["status"] == "ok" for item in checks) else "failed",
+                "status": (
+                    "ready"
+                    if all(item["status"] == "ok" for item in checks)
+                    else "failed"
+                ),
                 "checks": checks,
             }
             if readiness["status"] != "ready":

@@ -14,7 +14,9 @@ class SalesBronzeIngestionJob:
     def __init__(self, settings: Settings | None = None):
         self._job = SalesBronzeJob(settings=settings)
 
-    def run(self, mode: str = "full", load_date: Optional[datetime] = None) -> Dict[str, Dict]:
+    def run(
+        self, mode: str = "full", load_date: Optional[datetime] = None
+    ) -> Dict[str, Dict]:
         return self._job.run(mode=mode, load_date=load_date)
 
     def resume(

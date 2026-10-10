@@ -4,6 +4,7 @@ import pyodbc
 
 from src.core.settings import Settings, get_settings
 from src.shared.connectors.base_connector import BaseConnector
+from src.shared.observability.structured_logging import emit_event
 
 logger = logging.getLogger(__name__)
 
@@ -57,15 +58,24 @@ class SQLServerConnector(BaseConnector):
                 connection_string,
                 timeout=self.settings.bronze_query_timeout_seconds,
             )
-            logger.info("Connected to SQL Server: %s/%s", self.host, self.database)
+            emit_event(
+                logger,
+                logging.INFO,
+                "adapter.connected",
+                adapter="sql_server",
+                operation="connect",
+                status="SUCCESS",
+            )
             return True
         except Exception as exc:  # pragma: no cover - logging branch
-            logger.error(
-                "Failed to connect to SQL Server at %s:%s/%s (%s)",
-                self.host,
-                self.port,
-                self.database,
-                type(exc).__name__,
+            emit_event(
+                logger,
+                logging.ERROR,
+                "adapter.failed",
+                adapter="sql_server",
+                operation="connect",
+                status="FAILED",
+                error_type=type(exc).__name__,
             )
             self.connection = None
             return False
@@ -74,12 +84,27 @@ class SQLServerConnector(BaseConnector):
         if self.connection is not None:
             try:
                 self.connection.rollback()
-            except Exception:  # pragma: no cover - defensive cleanup
-                logger.warning("SQL Server rollback during disconnect failed")
+            except Exception as exc:  # pragma: no cover - defensive cleanup
+                emit_event(
+                    logger,
+                    logging.WARNING,
+                    "adapter.failed",
+                    adapter="sql_server",
+                    operation="rollback_on_disconnect",
+                    status="FAILED",
+                    error_type=type(exc).__name__,
+                )
             finally:
                 self.connection.close()
             self.connection = None
-            logger.info("Disconnected from SQL Server")
+            emit_event(
+                logger,
+                logging.INFO,
+                "adapter.disconnected",
+                adapter="sql_server",
+                operation="disconnect",
+                status="SUCCESS",
+            )
 
     def execute_query(self, query: str):
         if not self.connection:

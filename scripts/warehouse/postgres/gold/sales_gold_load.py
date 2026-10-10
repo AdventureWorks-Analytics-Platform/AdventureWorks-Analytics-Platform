@@ -205,42 +205,45 @@ class _PostgresGoldReader:
         return str(pointer.iloc[0]["candidate_schema"])
 
     def fact_batches(self, *, source_snapshot_id: str, batch_size: int) -> Iterator[FactBatch]:
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
         with PostgreSQLConnector(settings=self.settings) as pg:
             engine = _engine(pg.connection)
             try:
                 schema = self._schema(engine, source_snapshot_id)
-                bounds = pd.read_sql_query(
-                    'SELECT MIN(sales_order_detail_id) AS lower_bound, '
-                    'MAX(sales_order_detail_id) AS upper_bound '
-                    f'FROM "{schema}"."sales_order_detail_clean" '
-                    'WHERE "source_snapshot_id" = %(snapshot_id)s',
-                    engine,
-                    params={"snapshot_id": source_snapshot_id},
-                ).iloc[0]
                 lower_bound = None
-                maximum = bounds["upper_bound"]
                 batch_number = 0
-                headers = _read(engine, "sales_order_header_clean", source_snapshot_id, schema)
-                while pd.notna(maximum) and (lower_bound is None or lower_bound < maximum):
-                    upper_bound = (
-                        int(maximum)
+                while True:
+                    lower_sql = (
+                        ""
                         if lower_bound is None
-                        else min(int(maximum), int(lower_bound) + batch_size)
+                        else 'AND "sales_order_detail_id" > %(lower_bound)s '
                     )
-                    lower_sql = "" if lower_bound is None else (
-                        f' AND "sales_order_detail_id" > {int(lower_bound)}'
-                    )
+                    params = {"snapshot_id": source_snapshot_id, "batch_size": batch_size}
+                    if lower_bound is not None:
+                        params["lower_bound"] = int(lower_bound)
                     details = pd.read_sql_query(
                         f'SELECT * FROM "{schema}"."sales_order_detail_clean" '
                         'WHERE "source_snapshot_id" = %(snapshot_id)s '
-                        f'{lower_sql} '
-                        f'AND "sales_order_detail_id" <= {upper_bound} '
-                        'ORDER BY "sales_order_detail_id"',
+                        f'{lower_sql}'
+                        'ORDER BY "sales_order_detail_id" '
+                        'LIMIT %(batch_size)s',
                         engine,
-                        params={"snapshot_id": source_snapshot_id},
+                        params=params,
                     )
                     if details.empty:
                         break
+                    upper_bound = int(details["sales_order_detail_id"].iloc[-1])
+                    headers = pd.read_sql_query(
+                        f'SELECT * FROM "{schema}"."sales_order_header_clean" '
+                        'WHERE "source_snapshot_id" = %(snapshot_id)s '
+                        'AND "sales_order_id" = ANY(%(sales_order_ids)s)',
+                        engine,
+                        params={
+                            "snapshot_id": source_snapshot_id,
+                            "sales_order_ids": details["sales_order_id"].dropna().unique().tolist(),
+                        },
+                    )
                     batch_number += 1
                     yield build_fact_batch(
                         details,
@@ -262,6 +265,20 @@ class _PostgresGoldPublisher:
 
     def prepare(self, frames, identity, specs):
         return self.candidate_service.prepare_candidate(frames, identity, specs)
+
+    def prepare_streaming(self, frames, identity, specs):
+        return self.candidate_service.prepare_streaming_candidate(frames, identity, specs)
+
+    def write_fact_batch(self, candidate, batch, identity):
+        return self.candidate_service.write_fact_batch(candidate, batch, identity)
+
+    def validate_candidate(self, candidate, identity, specs):
+        return self.candidate_service.constraint_service.validate_candidate(
+            candidate, specs, require_silver_baseline=True
+        )
+
+    def finalize_streaming(self, candidate, specs):
+        return self.candidate_service.finalize_streaming_candidate(candidate, specs)
 
     def publish(self, prepared, **kwargs):
         return self.publish_service.publish(prepared, **kwargs)

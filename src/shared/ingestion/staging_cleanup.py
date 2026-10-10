@@ -31,7 +31,10 @@ class StagingCleanupJob:
                 self.staging_manager.cleanup(staging.name)
                 cleaned.append(staging.name)
                 continue
-            if staging.lifecycle in {FAILED, ABANDONED} and staging.failed_at is not None:
+            if (
+                staging.lifecycle in {FAILED, ABANDONED}
+                and staging.failed_at is not None
+            ):
                 if staging.failed_at <= cutoff:
                     self.staging_manager.expire(staging.name)
                     self.staging_manager.cleanup(staging.name)

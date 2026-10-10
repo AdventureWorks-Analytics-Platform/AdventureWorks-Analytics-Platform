@@ -204,18 +204,18 @@ def _settings(**overrides):
     return Settings(**values)
 
 
-def test_default_silver_job_has_no_sql_dedup_wiring_when_flag_disabled():
+def test_default_silver_job_wires_sql_dedup_by_default():
     pipeline = BronzeToSilverPipeline(settings=_settings())
-
-    assert pipeline.silver_job.dedup_service is None
-    assert pipeline.silver_job.sql_validator is None
-
-
-def test_default_silver_job_wires_sql_dedup_when_flag_enabled():
-    pipeline = BronzeToSilverPipeline(settings=_settings(silver_sql_dedup_enabled=True))
 
     assert isinstance(pipeline.silver_job.dedup_service, PostgresSilverDedupService)
     assert isinstance(pipeline.silver_job.sql_validator, PostgresSilverStagingValidator)
+
+
+def test_default_silver_job_keeps_pandas_path_when_sql_dedup_explicitly_disabled():
+    pipeline = BronzeToSilverPipeline(settings=_settings(silver_sql_dedup_enabled=False))
+
+    assert pipeline.silver_job.dedup_service is None
+    assert pipeline.silver_job.sql_validator is None
 
 
 def test_sales_and_person_bronze_complete_before_silver():

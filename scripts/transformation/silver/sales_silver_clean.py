@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Dict
+from typing import Callable, Dict
 
 import pandas as pd
 from sqlalchemy import create_engine
@@ -15,6 +15,7 @@ from src.shared.connectors.postgres_connector import PostgreSQLConnector
 from src.shared.ingestion.postgres_publish_service import (
     PostgresSilverPublishService,
     PostgresSilverStagingWriter,
+    build_silver_sql_dedup_kwargs,
 )
 
 
@@ -26,7 +27,6 @@ SILVER_TABLES = {
     "sales_person": "sales_person_clean",
     "product": "product_clean",
 }
-
 
 def _warehouse_engine(connection):
     return create_engine("postgresql://", creator=lambda: connection, poolclass=StaticPool)
@@ -313,7 +313,7 @@ def clean_product(frame: pd.DataFrame) -> pd.DataFrame:
     ]).sort_values("product_id", kind="mergesort").reset_index(drop=True)
 
 
-CLEANERS = {
+CLEANERS: dict[str, Callable[..., pd.DataFrame]] = {
     "sales_order_header": clean_sales_order_header,
     "sales_order_detail": clean_sales_order_detail,
     "customer": clean_customer,
@@ -323,11 +323,12 @@ CLEANERS = {
 }
 
 
-def run() -> Dict[str, Dict[str, int]]:
+def run() -> Dict[str, Dict[str, object]]:
     """Legacy Silver entrypoint that delegates to the injectable job/service."""
     job = SalesSilverJob(
         staging_writer=PostgresSilverStagingWriter(),
         publish_service=PostgresSilverPublishService(),
+        **build_silver_sql_dedup_kwargs(),
     )
     return job.run()
 

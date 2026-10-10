@@ -9,15 +9,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
-import json
 from contextlib import contextmanager
 from datetime import timedelta
+import logging
 import threading
+import time
 from typing import Any, Callable, Mapping
 
 import pandas as pd
 
 from src.core.settings import Settings, get_settings
+from src.shared.observability.structured_logging import emit_event
 from src.shared.ingestion.ingestion_models import (
     ExecutionIdentity,
     IngestionResult,
@@ -25,6 +27,9 @@ from src.shared.ingestion.ingestion_models import (
     deterministic_batch_id,
     utc_now,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 GOLD_TABLE_NAMES = (
@@ -40,22 +45,50 @@ FULL_READ_DIMENSION_TARGETS = frozenset(GOLD_TABLE_NAMES[:-1])
 GOLD_METADATA_COLUMNS = ("created_at", "gold_version", "source_snapshot_id")
 MEASURE_TOLERANCE = 1e-9
 GOLD_SQL_TYPES = {
-    "date_id": "INTEGER", "full_date": "DATE", "year_number": "SMALLINT",
-    "quarter_number": "SMALLINT", "month_number": "SMALLINT", "month_name": "VARCHAR(20)",
-    "day_number": "SMALLINT", "is_weekend": "BOOLEAN", "customer_id": "INTEGER",
-    "customer_name": "VARCHAR(255)", "customer_type": "VARCHAR(20)",
-    "customer_name_source": "VARCHAR(20)", "person_id": "INTEGER", "store_id": "INTEGER",
-    "territory_id": "INTEGER", "account_number": "VARCHAR(50)", "product_id": "INTEGER",
-    "product_name": "VARCHAR(255)", "product_number": "VARCHAR(50)", "product_line": "VARCHAR(2)",
-    "product_class": "VARCHAR(2)", "product_style": "VARCHAR(2)", "list_price": "NUMERIC(19,4)",
-    "standard_cost": "NUMERIC(19,4)", "is_discontinued": "BOOLEAN", "territory_name": "VARCHAR(255)",
-    "country_region_code": "VARCHAR(10)", "territory_group": "VARCHAR(255)",
-    "salesperson_id": "INTEGER", "business_entity_id": "INTEGER", "sales_quota": "NUMERIC(19,4)",
-    "bonus": "NUMERIC(19,4)", "commission_pct": "NUMERIC(19,4)", "salesperson_name": "VARCHAR(255)",
-    "sales_order_id": "INTEGER", "sales_order_detail_id": "INTEGER", "order_date_id": "INTEGER",
-    "order_qty": "INTEGER", "unit_price": "NUMERIC(19,4)", "discount_amount": "NUMERIC(19,4)",
-    "line_total": "NUMERIC(19,4)", "net_sales": "NUMERIC(19,4)",
-    "created_at": "TIMESTAMPTZ NOT NULL DEFAULT NOW()", "gold_version": "VARCHAR(32) NOT NULL",
+    "date_id": "INTEGER",
+    "full_date": "DATE",
+    "year_number": "SMALLINT",
+    "quarter_number": "SMALLINT",
+    "month_number": "SMALLINT",
+    "month_name": "VARCHAR(20)",
+    "day_number": "SMALLINT",
+    "is_weekend": "BOOLEAN",
+    "customer_id": "INTEGER",
+    "customer_name": "VARCHAR(255)",
+    "customer_type": "VARCHAR(20)",
+    "customer_name_source": "VARCHAR(20)",
+    "person_id": "INTEGER",
+    "store_id": "INTEGER",
+    "territory_id": "INTEGER",
+    "account_number": "VARCHAR(50)",
+    "product_id": "INTEGER",
+    "product_name": "VARCHAR(255)",
+    "product_number": "VARCHAR(50)",
+    "product_line": "VARCHAR(2)",
+    "product_class": "VARCHAR(2)",
+    "product_style": "VARCHAR(2)",
+    "list_price": "NUMERIC(19,4)",
+    "standard_cost": "NUMERIC(19,4)",
+    "is_discontinued": "BOOLEAN",
+    "territory_name": "VARCHAR(255)",
+    "country_region_code": "VARCHAR(10)",
+    "territory_group": "VARCHAR(255)",
+    "salesperson_id": "INTEGER",
+    "business_entity_id": "INTEGER",
+    "sales_quota": "NUMERIC(19,4)",
+    "bonus": "NUMERIC(19,4)",
+    "commission_pct": "NUMERIC(19,4)",
+    "salesperson_name": "VARCHAR(255)",
+    "sales_order_id": "INTEGER",
+    "sales_order_detail_id": "INTEGER",
+    "order_date_id": "INTEGER",
+    "order_qty": "INTEGER",
+    "unit_price": "NUMERIC(19,4)",
+    "discount_amount": "NUMERIC(19,4)",
+    "line_total": "NUMERIC(19,4)",
+    "net_sales": "NUMERIC(19,4)",
+    "created_at": "TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+    "gold_version": "VARCHAR(32) NOT NULL",
     "source_snapshot_id": "VARCHAR(128) NOT NULL",
 }
 
@@ -99,15 +132,20 @@ def build_fact_batch(
         raise ValueError("Fact batch is missing sales_order_detail_id")
     if details.empty:
         raise ValueError("Fact batch cannot be empty")
-    ordered = details.sort_values("sales_order_detail_id", kind="mergesort").reset_index(drop=True)
+    ordered = details.sort_values(
+        "sales_order_detail_id", kind="mergesort"
+    ).reset_index(drop=True)
     keys = ordered["sales_order_detail_id"]
     if lower_bound is not None and not (keys > lower_bound).all():
         raise ValueError("Fact batch contains keys outside its lower bound")
     if upper_bound is not None and not (keys <= upper_bound).all():
         raise ValueError("Fact batch contains keys outside its upper bound")
     batch_id = deterministic_batch_id(
-        "sales_order_detail_clean", "sales_order_detail_id",
-        lower_bound, upper_bound, source_snapshot_id,
+        "sales_order_detail_clean",
+        "sales_order_detail_id",
+        lower_bound,
+        upper_bound,
+        source_snapshot_id,
     )
     return FactBatch(
         dataframe=build_fact_sales(ordered, headers),
@@ -126,11 +164,14 @@ def stable_key_batch_query(
     upper_bound: Any,
 ) -> str:
     """Return the required half-open stable-key predicate for an injected reader."""
-    safe_identifier = lambda value: all(
-        part.replace("_", "").isalnum() and not part[0].isdigit()
-        for part in value.split(".")
-        if part
-    )
+
+    def safe_identifier(value: str) -> bool:
+        return all(
+            part.replace("_", "").isalnum() and not part[0].isdigit()
+            for part in value.split(".")
+            if part
+        )
+
     if not safe_identifier(source_table) or not safe_identifier(ordering_key):
         raise ValueError("source table and ordering key must be safe identifiers")
     lower = "NULL" if lower_bound is None else repr(lower_bound)
@@ -138,16 +179,25 @@ def stable_key_batch_query(
     lower_predicate = "" if lower_bound is None else f' AND "{ordering_key}" > {lower}'
     upper_predicate = "" if upper_bound is None else f' AND "{ordering_key}" <= {upper}'
     return (
-        f'SELECT * FROM {source_table} WHERE 1=1{lower_predicate}{upper_predicate}'
+        f"SELECT * FROM {source_table} WHERE 1=1{lower_predicate}{upper_predicate}"
         f' ORDER BY "{ordering_key}"'
     )
 
 
 def validate_fact_frame(frame: pd.DataFrame) -> None:
     required = {
-        "sales_order_detail_id", "sales_order_id", "order_date_id", "customer_id",
-        "product_id", "territory_id", "salesperson_id", "order_qty", "unit_price",
-        "discount_amount", "line_total", "net_sales",
+        "sales_order_detail_id",
+        "sales_order_id",
+        "order_date_id",
+        "customer_id",
+        "product_id",
+        "territory_id",
+        "salesperson_id",
+        "order_qty",
+        "unit_price",
+        "discount_amount",
+        "line_total",
+        "net_sales",
     }
     missing = sorted(required - set(frame.columns))
     if missing:
@@ -156,7 +206,13 @@ def validate_fact_frame(frame: pd.DataFrame) -> None:
         raise ValueError("fact_sales key contains NULL values")
     if not frame["sales_order_detail_id"].is_unique:
         raise ValueError("fact_sales key is not unique")
-    for column in ("order_qty", "unit_price", "discount_amount", "line_total", "net_sales"):
+    for column in (
+        "order_qty",
+        "unit_price",
+        "discount_amount",
+        "line_total",
+        "net_sales",
+    ):
         values = pd.to_numeric(frame[column], errors="coerce")
         if values.isna().any() or not values.map(pd.api.types.is_number).all():
             raise ValueError(f"fact_sales.{column} contains non-numeric values")
@@ -172,10 +228,14 @@ def _kpi_metrics(fact: pd.DataFrame) -> dict[str, float]:
     total_line_items = float(len(fact))
     total_units = float(pd.to_numeric(fact["order_qty"], errors="coerce").sum())
     gross_sales = float(
-        (pd.to_numeric(fact["unit_price"], errors="coerce")
-         * pd.to_numeric(fact["order_qty"], errors="coerce")).sum()
+        (
+            pd.to_numeric(fact["unit_price"], errors="coerce")
+            * pd.to_numeric(fact["order_qty"], errors="coerce")
+        ).sum()
     )
-    discount_amount = float(pd.to_numeric(fact["discount_amount"], errors="coerce").sum())
+    discount_amount = float(
+        pd.to_numeric(fact["discount_amount"], errors="coerce").sum()
+    )
     return {
         "total_revenue": total_revenue,
         "total_orders": total_orders,
@@ -231,7 +291,9 @@ class GoldIntegrityValidator:
             except ValueError as exc:
                 issues.append(str(exc))
                 if spec.primary_key in frame.columns:
-                    duplicate_counts[spec.target_table] = int(frame[spec.primary_key].duplicated().sum())
+                    duplicate_counts[spec.target_table] = int(
+                        frame[spec.primary_key].duplicated().sum()
+                    )
 
         fact = frames.get("fact_sales")
         if fact is not None:
@@ -245,8 +307,15 @@ class GoldIntegrityValidator:
                     orphan_counts[column] = count
                     issues.append(f"orphan references in fact_sales.{column}: {count}")
             required_non_null = [
-                "sales_order_id", "order_date_id", "customer_id", "product_id",
-                "territory_id", "order_qty", "unit_price", "line_total", "net_sales",
+                "sales_order_id",
+                "order_date_id",
+                "customer_id",
+                "product_id",
+                "territory_id",
+                "order_qty",
+                "unit_price",
+                "line_total",
+                "net_sales",
             ]
             for column in required_non_null:
                 if fact[column].isna().any():
@@ -256,23 +325,34 @@ class GoldIntegrityValidator:
                 * pd.to_numeric(fact["unit_price"], errors="coerce")
                 - pd.to_numeric(fact["line_total"], errors="coerce")
             ).round(4)
-            actual_discount = pd.to_numeric(
-                fact["discount_amount"], errors="coerce"
-            )
-            if not expected_discount.sub(actual_discount).abs().le(
-                MEASURE_TOLERANCE
-            ).all():
-                issues.append("fact_sales.discount_amount does not match approved formula")
+            actual_discount = pd.to_numeric(fact["discount_amount"], errors="coerce")
+            if (
+                not expected_discount.sub(actual_discount)
+                .abs()
+                .le(MEASURE_TOLERANCE)
+                .all()
+            ):
+                issues.append(
+                    "fact_sales.discount_amount does not match approved formula"
+                )
             if not expected_discount.ge(-MEASURE_TOLERANCE).all():
                 issues.append("fact_sales.discount_amount contains negative values")
-            if not pd.to_numeric(fact["net_sales"], errors="coerce").eq(
-                pd.to_numeric(fact["line_total"], errors="coerce")
-            ).all():
+            if (
+                not pd.to_numeric(fact["net_sales"], errors="coerce")
+                .eq(pd.to_numeric(fact["line_total"], errors="coerce"))
+                .all()
+            ):
                 issues.append("fact_sales.net_sales does not match line_total")
 
-        kpi_report = self._validate_kpis(fact) if fact is not None else {
-            "kpi_passed": False, "comparisons": {}, "issues": ["fact_sales is missing"]
-        }
+        kpi_report = (
+            self._validate_kpis(fact)
+            if fact is not None
+            else {
+                "kpi_passed": False,
+                "comparisons": {},
+                "issues": ["fact_sales is missing"],
+            }
+        )
         issues.extend(kpi_report.get("issues", []))
         return {
             "validation_passed": not issues,
@@ -303,6 +383,7 @@ class GoldIntegrityValidator:
             if not passed:
                 issues.append(f"KPI mismatch for {name}: variance={variance:.6f}")
         return {"kpi_passed": not issues, "comparisons": comparisons, "issues": issues}
+
 
 SILVER_TARGETS = (
     "sales_order_header_clean",
@@ -374,7 +455,9 @@ class GoldConstraintManager:
         for spec in specs:
             frame = frames.get(spec.target_table)
             if frame is None:
-                raise GoldConstraintError(f"candidate is missing table: {spec.target_table}")
+                raise GoldConstraintError(
+                    f"candidate is missing table: {spec.target_table}"
+                )
             candidate_frame = frame.copy()
             candidate_frame["created_at"] = utc_now()
             candidate_frame["gold_version"] = gold_version
@@ -429,7 +512,9 @@ class GoldConstraintManager:
             if not set(GOLD_METADATA_COLUMNS).issubset(metadata):
                 issues.append(f"{spec.target_table} missing Gold metadata contract")
             if spec.primary_key not in columns:
-                issues.append(f"{spec.target_table} missing primary key column: {spec.primary_key}")
+                issues.append(
+                    f"{spec.target_table} missing primary key column: {spec.primary_key}"
+                )
             primary_keys[spec.target_table] = (spec.primary_key,)
             foreign_keys[spec.target_table] = dict(spec.foreign_keys)
             declared_fks = table.get("foreign_keys", spec.foreign_keys)
@@ -530,11 +615,13 @@ class GoldPublishService:
             candidate = self.constraint_manager.create_candidate_schema(
                 frames, identity, specs, gold_version=version
             )
-            candidate.update({
-                "gold_run_id": identity.gold_run_id,
-                "lifecycle": "ACTIVE",
-                "created_at": utc_now(),
-            })
+            candidate.update(
+                {
+                    "gold_run_id": identity.gold_run_id,
+                    "lifecycle": "ACTIVE",
+                    "created_at": utc_now(),
+                }
+            )
             self._candidates[version] = candidate
             return {
                 "candidate_schema": candidate["candidate_schema"],
@@ -543,8 +630,12 @@ class GoldPublishService:
                 "candidate": candidate,
             }
 
-    def publish(self, prepared: Mapping[str, Any], identity: GoldExecutionIdentity) -> dict[str, Any]:
+    def publish(
+        self, prepared: Mapping[str, Any], identity: GoldExecutionIdentity
+    ) -> dict[str, Any]:
         version = prepared.get("gold_version")
+        if not isinstance(version, str):
+            raise GoldPublicationError("candidate version is missing")
         with self._lock:
             candidate = self._candidates.get(version)
             if candidate is None or candidate is not prepared.get("candidate"):
@@ -556,11 +647,13 @@ class GoldPublishService:
                 raise GoldPublicationError("candidate constraints are not verified")
             previous = self._current_version
             published = dict(candidate)
-            published.update({
-                "lifecycle": "PUBLISHED",
-                "published_at": utc_now(),
-                "previous_version": previous,
-            })
+            published.update(
+                {
+                    "lifecycle": "PUBLISHED",
+                    "published_at": utc_now(),
+                    "previous_version": previous,
+                }
+            )
             # Pointer and version become visible together under the same lock.
             self._versions[version] = published
             self._current_version = version
@@ -575,6 +668,8 @@ class GoldPublishService:
 
     def mark_failed(self, prepared: Mapping[str, Any]) -> None:
         version = prepared.get("gold_version")
+        if not isinstance(version, str):
+            raise GoldPublicationError("candidate version is missing")
         with self._lock:
             candidate = self._candidates.get(version)
             if candidate is not None and candidate.get("lifecycle") != "PUBLISHED":
@@ -620,7 +715,9 @@ class GoldPublishService:
                 return operation()
             except UnknownCommitError:
                 try:
-                    decision = reconciliation.resolve(staging_name, batch_id, content_hash)
+                    decision = reconciliation.resolve(
+                        staging_name, batch_id, content_hash
+                    )
                 except TypeError:
                     decision = reconciliation.resolve(
                         batch_id=batch_id,
@@ -667,9 +764,12 @@ def validate_dimension_frame(frame: pd.DataFrame, spec: GoldTableSpec) -> None:
         elif expected_type == "string":
             valid = values.map(lambda value: isinstance(value, str)).all()
         elif expected_type == "date":
-            valid = pd.api.types.is_datetime64_any_dtype(series) or values.map(
-                lambda value: hasattr(value, "year") and hasattr(value, "month")
-            ).all()
+            valid = (
+                pd.api.types.is_datetime64_any_dtype(series)
+                or values.map(
+                    lambda value: hasattr(value, "year") and hasattr(value, "month")
+                ).all()
+            )
         else:
             valid = False
         if not valid:
@@ -680,55 +780,135 @@ def validate_dimension_frame(frame: pd.DataFrame, spec: GoldTableSpec) -> None:
 
 GOLD_TABLE_SPECS = (
     GoldTableSpec(
-        "sales_order_header_clean", "dim_date", "date_id",
-        ("date_id", "full_date", "year_number", "quarter_number", "month_number", "month_name", "day_number", "is_weekend"),
-        expected_types={
-            "date_id": "integer", "full_date": "date", "year_number": "integer",
-            "quarter_number": "integer", "month_number": "integer", "month_name": "string",
-            "day_number": "integer", "is_weekend": "boolean",
-        },
-    ),
-    GoldTableSpec(
-        "customer_clean", "dim_customer", "customer_id",
+        "sales_order_header_clean",
+        "dim_date",
+        "date_id",
         (
-            "customer_id", "customer_name", "customer_type", "customer_name_source",
-            "person_id", "store_id", "territory_id", "account_number",
+            "date_id",
+            "full_date",
+            "year_number",
+            "quarter_number",
+            "month_number",
+            "month_name",
+            "day_number",
+            "is_weekend",
         ),
         expected_types={
-            "customer_id": "integer", "customer_name": "string", "customer_type": "string",
-            "customer_name_source": "string", "person_id": "integer",
-            "store_id": "integer", "territory_id": "integer", "account_number": "string",
+            "date_id": "integer",
+            "full_date": "date",
+            "year_number": "integer",
+            "quarter_number": "integer",
+            "month_number": "integer",
+            "month_name": "string",
+            "day_number": "integer",
+            "is_weekend": "boolean",
         },
     ),
     GoldTableSpec(
-        "product_clean", "dim_product", "product_id",
-        ("product_id", "product_name", "product_number", "product_line", "product_class", "product_style", "list_price", "standard_cost", "is_discontinued"),
+        "customer_clean",
+        "dim_customer",
+        "customer_id",
+        (
+            "customer_id",
+            "customer_name",
+            "customer_type",
+            "customer_name_source",
+            "person_id",
+            "store_id",
+            "territory_id",
+            "account_number",
+        ),
         expected_types={
-            "product_id": "integer", "product_name": "string", "product_number": "string",
-            "product_line": "string", "product_class": "string", "product_style": "string",
-            "list_price": "number", "standard_cost": "number", "is_discontinued": "boolean",
+            "customer_id": "integer",
+            "customer_name": "string",
+            "customer_type": "string",
+            "customer_name_source": "string",
+            "person_id": "integer",
+            "store_id": "integer",
+            "territory_id": "integer",
+            "account_number": "string",
         },
     ),
     GoldTableSpec(
-        "sales_territory_clean", "dim_territory", "territory_id",
+        "product_clean",
+        "dim_product",
+        "product_id",
+        (
+            "product_id",
+            "product_name",
+            "product_number",
+            "product_line",
+            "product_class",
+            "product_style",
+            "list_price",
+            "standard_cost",
+            "is_discontinued",
+        ),
+        expected_types={
+            "product_id": "integer",
+            "product_name": "string",
+            "product_number": "string",
+            "product_line": "string",
+            "product_class": "string",
+            "product_style": "string",
+            "list_price": "number",
+            "standard_cost": "number",
+            "is_discontinued": "boolean",
+        },
+    ),
+    GoldTableSpec(
+        "sales_territory_clean",
+        "dim_territory",
+        "territory_id",
         ("territory_id", "territory_name", "country_region_code", "territory_group"),
         expected_types={
-            "territory_id": "integer", "territory_name": "string",
-            "country_region_code": "string", "territory_group": "string",
+            "territory_id": "integer",
+            "territory_name": "string",
+            "country_region_code": "string",
+            "territory_group": "string",
         },
     ),
     GoldTableSpec(
-        "sales_person_clean", "dim_salesperson", "salesperson_id",
-        ("salesperson_id", "business_entity_id", "territory_id", "sales_quota", "bonus", "commission_pct", "salesperson_name"),
+        "sales_person_clean",
+        "dim_salesperson",
+        "salesperson_id",
+        (
+            "salesperson_id",
+            "business_entity_id",
+            "territory_id",
+            "sales_quota",
+            "bonus",
+            "commission_pct",
+            "salesperson_name",
+        ),
         expected_types={
-            "salesperson_id": "integer", "business_entity_id": "integer", "territory_id": "integer",
-            "sales_quota": "number", "bonus": "number", "commission_pct": "number",
+            "salesperson_id": "integer",
+            "business_entity_id": "integer",
+            "territory_id": "integer",
+            "sales_quota": "number",
+            "bonus": "number",
+            "commission_pct": "number",
             "salesperson_name": "string",
         },
     ),
     GoldTableSpec(
-        "sales_order_detail_clean", "fact_sales", "sales_order_detail_id",
-        ("sales_order_detail_id", "sales_order_id", "order_date_id", "customer_id", "product_id", "territory_id", "salesperson_id", "order_qty", "unit_price", "discount_amount", "line_total", "net_sales"),
+        "sales_order_detail_clean",
+        "fact_sales",
+        "sales_order_detail_id",
+        (
+            "sales_order_detail_id",
+            "sales_order_id",
+            "order_date_id",
+            "customer_id",
+            "product_id",
+            "territory_id",
+            "salesperson_id",
+            "order_qty",
+            "unit_price",
+            "discount_amount",
+            "line_total",
+            "net_sales",
+        ),
         foreign_keys={
             "order_date_id": ("dim_date", "date_id"),
             "customer_id": ("dim_customer", "customer_id"),
@@ -757,7 +937,11 @@ class SilverSnapshotGate:
     ) -> dict[str, Any]:
         if not isinstance(silver_result, Mapping):
             raise SilverSnapshotError("Silver result must be a mapping")
-        snapshot_id = source_snapshot_id or silver_result.get("source_snapshot_id") or silver_result.get("snapshot_id")
+        snapshot_id = (
+            source_snapshot_id
+            or silver_result.get("source_snapshot_id")
+            or silver_result.get("snapshot_id")
+        )
         table_results = silver_result.get("silver", silver_result)
         if not isinstance(table_results, Mapping):
             raise SilverSnapshotError("Silver table results must be a mapping")
@@ -770,29 +954,53 @@ class SilverSnapshotGate:
             result = table_results[target]
             if not isinstance(result, Mapping):
                 raise SilverSnapshotError(f"Silver result for {target} is invalid")
-            if result.get("status") not in {"SUCCESS", "SUCCESS_WITH_REJECTIONS", IngestionStatus.SUCCESS.value}:
+            if result.get("status") not in {
+                "SUCCESS",
+                "SUCCESS_WITH_REJECTIONS",
+                IngestionStatus.SUCCESS.value,
+            }:
                 raise SilverSnapshotError(f"Silver target {target} is not successful")
             if result.get("published") is not True:
                 raise SilverSnapshotError(f"Silver target {target} is not published")
-            identity = result.get("source_snapshot_id", result.get("snapshot_id", result.get("run_id")))
+            identity = result.get(
+                "source_snapshot_id", result.get("snapshot_id", result.get("run_id"))
+            )
             if identity != snapshot_id:
                 raise SilverSnapshotError(
                     f"Silver target {target} has inconsistent source snapshot: {identity!r}"
                 )
-        return {"status": "SUCCESS", "source_snapshot_id": str(snapshot_id), "target_count": len(table_results)}
+        return {
+            "status": "SUCCESS",
+            "source_snapshot_id": str(snapshot_id),
+            "target_count": len(table_results),
+        }
 
 
 @dataclass(frozen=True)
 class GoldExecutionIdentity(ExecutionIdentity):
-    """Gold identity while retaining the shared execution identity fields."""
+    """Execution identity scoped to one pipeline and source snapshot."""
 
     pipeline_snapshot_id: str = ""
     source_snapshot_id: str = ""
 
     @classmethod
-    def create(cls, pipeline_snapshot_id: str, source_snapshot_id: str) -> "GoldExecutionIdentity":
+    def create(
+        cls,
+        pipeline_snapshot_id: str | None = None,
+        source_snapshot_id: str | None = None,
+    ) -> "GoldExecutionIdentity":
+        if (pipeline_snapshot_id is None) != (source_snapshot_id is None):
+            raise ValueError(
+                "pipeline_snapshot_id and source_snapshot_id must be provided together"
+            )
         base = ExecutionIdentity.create()
-        return cls(base.run_id, base.load_id, base.batch_id, pipeline_snapshot_id, source_snapshot_id)
+        return cls(
+            base.run_id,
+            base.load_id,
+            base.batch_id,
+            pipeline_snapshot_id or "",
+            source_snapshot_id or "",
+        )
 
     @property
     def gold_run_id(self) -> str:
@@ -877,7 +1085,9 @@ class GoldRunResult:
             "current_pointer": self.current_pointer,
             "error_type": self.error_type,
             "error_message": self.error_message,
-            "tables": {name: result.to_dict() for name, result in self.table_results.items()},
+            "tables": {
+                name: result.to_dict() for name, result in self.table_results.items()
+            },
         }
 
 
@@ -917,9 +1127,22 @@ class SalesGoldJob:
         pipeline_snapshot_id: str,
         silver_result: Mapping[str, Any],
     ) -> dict[str, Any]:
+        started_clock = time.perf_counter()
         gate = self.snapshot_gate.validate(silver_result)
         source_snapshot_id = gate["source_snapshot_id"]
-        identity = GoldExecutionIdentity.create(pipeline_snapshot_id, source_snapshot_id)
+        identity = GoldExecutionIdentity.create(
+            pipeline_snapshot_id, source_snapshot_id
+        )
+        emit_event(
+            logger,
+            logging.INFO,
+            "pipeline.started",
+            run_id=identity.gold_run_id,
+            load_id=identity.gold_load_id,
+            stage="gold",
+            source_snapshot_id=identity.source_snapshot_id,
+            gold_run_id=identity.gold_run_id,
+        )
         table_results: dict[str, GoldTableResult] = {}
         started_at = utc_now()
         prepared = None
@@ -927,47 +1150,240 @@ class SalesGoldJob:
         if run_started:
             self.publisher.start_run(identity.gold_run_id)
         try:
-            frames, fact_batches = self._build_frames(source_snapshot_id, identity)
-            report = dict(self.validator(frames, GOLD_TABLE_SPECS, identity))
+            streaming = all(
+                hasattr(self.publisher, name)
+                for name in (
+                    "prepare_streaming",
+                    "write_fact_batch",
+                    "validate_candidate",
+                    "finalize_streaming",
+                )
+            )
+            fact_rows = None
+            for spec in GOLD_TABLE_SPECS:
+                emit_event(
+                    logger,
+                    logging.INFO,
+                    "table.started",
+                    run_id=identity.gold_run_id,
+                    load_id=identity.gold_load_id,
+                    stage="gold",
+                    source_table=spec.source_table,
+                    target_table=spec.target_table,
+                )
+            if streaming:
+                frames = self._build_dimension_frames(source_snapshot_id)
+                prepared = self.publisher.prepare_streaming(
+                    frames, identity, GOLD_TABLE_SPECS
+                )
+                fact_rows = self._write_fact_batches(
+                    source_snapshot_id, identity, prepared
+                )
+                report = dict(
+                    self.publisher.validate_candidate(
+                        prepared, identity, GOLD_TABLE_SPECS
+                    )
+                )
+                report["gold_run_id"] = identity.gold_run_id
+                report["source_snapshot_id"] = identity.source_snapshot_id
+            else:
+                frames, fact_batches = self._build_frames(source_snapshot_id, identity)
+                report = dict(self.validator(frames, GOLD_TABLE_SPECS, identity))
             if not report.get("validation_passed", False):
-                raise ValueError(report.get("error_message", "Gold validation failed"))
-            prepared = self.publisher.prepare(frames, identity, GOLD_TABLE_SPECS)
+                message = report.get("error_message")
+                issues = report.get("issues")
+                if not message and isinstance(issues, (list, tuple)):
+                    message = "; ".join(str(issue) for issue in issues)
+                raise ValueError(message or "Gold validation failed")
+            if prepared is None:
+                prepared = self.publisher.prepare(frames, identity, GOLD_TABLE_SPECS)
             constraints = self.constraint_manager.verify(prepared, GOLD_TABLE_SPECS)
             if not constraints.get("constraints_verified", False):
-                raise ValueError(constraints.get("error_message", "Gold constraints failed"))
+                raise ValueError(
+                    constraints.get("error_message", "Gold constraints failed")
+                )
+            if streaming:
+                constraints = dict(
+                    self.publisher.finalize_streaming(prepared, GOLD_TABLE_SPECS)
+                )
+                if not constraints.get("constraints_verified", False):
+                    raise ValueError(
+                        constraints.get("error_message", "Gold constraints failed")
+                    )
             publication = self._publish_candidate(
-                prepared, identity, report, constraints, fact_batches
+                prepared,
+                identity,
+                report,
+                constraints,
+                () if streaming else fact_batches,
+                fact_rows=fact_rows,
             )
             for spec in GOLD_TABLE_SPECS:
                 table_results[spec.target_table] = self._table_result(
-                    spec, identity, started_at, len(frames[spec.target_table]),
+                    spec,
+                    identity,
+                    started_at,
+                    (
+                        fact_rows
+                        if spec.target_table == "fact_sales" and streaming
+                        else len(frames[spec.target_table])
+                    ),
                     status=IngestionStatus.SUCCESS,
-                    candidate=prepared, report=report, constraints=constraints,
+                    candidate=prepared,
+                    report=report,
+                    constraints=constraints,
                     publication=publication,
                 )
+                emit_event(
+                    logger,
+                    logging.INFO,
+                    "table.completed",
+                    run_id=identity.gold_run_id,
+                    load_id=identity.gold_load_id,
+                    stage="gold",
+                    source_table=spec.source_table,
+                    target_table=spec.target_table,
+                    status="SUCCESS",
+                    rows_read=(
+                        fact_rows
+                        if spec.target_table == "fact_sales" and streaming
+                        else len(frames[spec.target_table])
+                    ),
+                    rows_written=(
+                        fact_rows
+                        if spec.target_table == "fact_sales" and streaming
+                        else len(frames[spec.target_table])
+                    ),
+                    source_snapshot_id=identity.source_snapshot_id,
+                    gold_run_id=identity.gold_run_id,
+                    gold_version=publication.get("gold_version"),
+                )
             result = GoldRunResult(
-                identity, IngestionStatus.SUCCESS, table_results,
+                identity,
+                IngestionStatus.SUCCESS,
+                table_results,
                 gold_version=publication.get("gold_version"),
                 candidate_schema=publication.get("candidate_schema"),
-                published=True, validation_passed=True,
+                published=True,
+                validation_passed=True,
                 constraints_verified=True,
-                kpi_passed=report.get("kpi_passed", publication.get("kpi_passed", False)),
+                kpi_passed=report.get(
+                    "kpi_passed", publication.get("kpi_passed", False)
+                ),
                 previous_version=publication.get("previous_version"),
                 current_pointer=publication.get("current_pointer"),
             )
         except Exception as exc:
             if prepared is not None and hasattr(self.publisher, "mark_failed"):
                 self.publisher.mark_failed(prepared)
+            for spec in GOLD_TABLE_SPECS:
+                emit_event(
+                    logger,
+                    logging.ERROR,
+                    "table.failed",
+                    run_id=identity.gold_run_id,
+                    load_id=identity.gold_load_id,
+                    stage="gold",
+                    source_table=spec.source_table,
+                    target_table=spec.target_table,
+                    status="FAILED",
+                    source_snapshot_id=identity.source_snapshot_id,
+                    gold_run_id=identity.gold_run_id,
+                    error_type=type(exc).__name__,
+                )
             result = GoldRunResult(
-                identity, IngestionStatus.FAILED, table_results,
-                error_type=type(exc).__name__, error_message=str(exc),
+                identity,
+                IngestionStatus.FAILED,
+                table_results,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
             )
         finally:
             if run_started:
                 self.publisher.finish_run(identity.gold_run_id)
         if self.audit is not None and hasattr(self.audit, "record"):
             self.audit.record(result)
-        return result.to_dict()
+        result_dict = result.to_dict()
+        succeeded = result.status is IngestionStatus.SUCCESS
+        emit_event(
+            logger,
+            logging.INFO if succeeded else logging.ERROR,
+            "pipeline.completed" if succeeded else "pipeline.failed",
+            run_id=identity.gold_run_id,
+            load_id=identity.gold_load_id,
+            stage="gold",
+            status=result.status.value,
+            duration_ms=max(0, int((time.perf_counter() - started_clock) * 1000)),
+            source_snapshot_id=identity.source_snapshot_id,
+            gold_run_id=identity.gold_run_id,
+            gold_version=result.gold_version,
+            error_type=result.error_type,
+        )
+        return result_dict
+
+    def _build_dimension_frames(
+        self, source_snapshot_id: str
+    ) -> dict[str, pd.DataFrame]:
+        frames: dict[str, pd.DataFrame] = {}
+        for spec in GOLD_TABLE_SPECS:
+            if spec.target_table == "fact_sales":
+                continue
+            frame = self.reader(
+                spec.source_table, source_snapshot_id=source_snapshot_id
+            )
+            built = self.builders[spec.target_table](frame)
+            validate_dimension_frame(built, spec)
+            frames[spec.target_table] = built
+        return frames
+
+    def _write_fact_batches(
+        self,
+        source_snapshot_id: str,
+        identity: GoldExecutionIdentity,
+        candidate: Mapping[str, Any],
+    ) -> int:
+        if self.fact_batch_reader is None:
+            raise ValueError(
+                "fact_batch_reader is required; fact_sales cannot use a full-table read"
+            )
+        row_count = 0
+        batch_count = 0
+        for batch in self.fact_batch_reader(
+            source_snapshot_id=source_snapshot_id,
+            batch_size=getattr(self.settings, "batch_size", 10000),
+        ):
+            if not isinstance(batch, FactBatch):
+                raise TypeError("fact_batch_reader must yield FactBatch values")
+            validate_fact_frame(batch.dataframe)
+            batch_started_clock = time.perf_counter()
+            self.publisher.write_fact_batch(candidate, batch, identity)
+            if self.checkpoint_manager is not None:
+                self.checkpoint_manager.mark_committed(batch.batch_id)
+                self.checkpoint_manager.advance(batch.batch_id, batch.upper_bound)
+            row_count += len(batch.dataframe)
+            batch_count += 1
+            emit_event(
+                logger,
+                logging.INFO,
+                "batch.completed",
+                run_id=identity.gold_run_id,
+                load_id=identity.gold_load_id,
+                batch_id=batch.batch_id,
+                stage="gold",
+                source_table="silver.sales_order_detail_clean",
+                target_table="gold.fact_sales",
+                status="SUCCESS",
+                duration_ms=max(
+                    0, int((time.perf_counter() - batch_started_clock) * 1000)
+                ),
+                rows_read=len(batch.dataframe),
+                rows_written=len(batch.dataframe),
+                source_snapshot_id=identity.source_snapshot_id,
+                gold_run_id=identity.gold_run_id,
+            )
+        if batch_count == 0:
+            raise ValueError("fact_batch_reader returned no batches")
+        return row_count
 
     def _build_frames(
         self,
@@ -989,27 +1405,58 @@ class SalesGoldJob:
                     if not isinstance(batch, FactBatch):
                         raise TypeError("fact_batch_reader must yield FactBatch values")
                     validate_fact_frame(batch.dataframe)
+                    batch_started_clock = time.perf_counter()
                     if self.fact_batch_writer is not None:
                         self.fact_batch_writer(batch, identity)
                     if self.checkpoint_manager is not None:
                         self.checkpoint_manager.mark_committed(batch.batch_id)
-                        self.checkpoint_manager.advance(batch.batch_id, batch.upper_bound)
+                        self.checkpoint_manager.advance(
+                            batch.batch_id, batch.upper_bound
+                        )
                     fact_batches.append(batch)
+                    emit_event(
+                        logger,
+                        logging.INFO,
+                        "batch.completed",
+                        run_id=identity.gold_run_id,
+                        load_id=identity.gold_load_id,
+                        batch_id=batch.batch_id,
+                        stage="gold",
+                        source_table="silver.sales_order_detail_clean",
+                        target_table="gold.fact_sales",
+                        status="SUCCESS",
+                        duration_ms=max(
+                            0,
+                            int((time.perf_counter() - batch_started_clock) * 1000),
+                        ),
+                        rows_read=len(batch.dataframe),
+                        rows_written=len(batch.dataframe),
+                        source_snapshot_id=identity.source_snapshot_id,
+                        gold_run_id=identity.gold_run_id,
+                    )
                 if not fact_batches:
                     raise ValueError("fact_batch_reader returned no batches")
                 frames[spec.target_table] = pd.concat(
                     [batch.dataframe for batch in fact_batches], ignore_index=True
                 )
                 continue
-            frame = self.reader(spec.source_table, source_snapshot_id=source_snapshot_id)
+            frame = self.reader(
+                spec.source_table, source_snapshot_id=source_snapshot_id
+            )
             built = self.builders[spec.target_table](frame)
             validate_dimension_frame(built, spec)
             frames[spec.target_table] = built
         return frames, tuple(fact_batches)
 
-    def _publish_candidate(self, prepared, identity, report, constraints, fact_batches):
+    def _publish_candidate(
+        self, prepared, identity, report, constraints, fact_batches, *, fact_rows=None
+    ):
         counts = {
-            "fact_rows": sum(len(batch.dataframe) for batch in fact_batches),
+            "fact_rows": (
+                fact_rows
+                if fact_rows is not None
+                else sum(len(batch.dataframe) for batch in fact_batches)
+            ),
             "dimension_rows": sum(
                 len(frame)
                 for name, frame in prepared.get("frames", {}).items()
@@ -1035,7 +1482,18 @@ class SalesGoldJob:
             return self.publisher.publish(prepared, identity)
 
     @staticmethod
-    def _table_result(spec, identity, started_at, rows_written, *, status, candidate, report, constraints, publication):
+    def _table_result(
+        spec,
+        identity,
+        started_at,
+        rows_written,
+        *,
+        status,
+        candidate,
+        report,
+        constraints,
+        publication,
+    ):
         return GoldTableResult(
             identity=identity,
             stage="gold",

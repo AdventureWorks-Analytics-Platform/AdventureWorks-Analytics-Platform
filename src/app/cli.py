@@ -8,6 +8,7 @@ from typing import Callable
 
 from src.app.app import App
 from src.app.reporter import PipelineReporter
+from src.shared.observability.structured_logging import configure_logging
 
 
 EXIT_CODES = {
@@ -46,7 +47,7 @@ def main(
     reporter_factory: Callable[[], PipelineReporter] = PipelineReporter,
 ) -> int:
     args = build_parser().parse_args(argv)
-    logging.basicConfig(level=getattr(logging, args.log_level))
+    configure_logging(level=getattr(logging, args.log_level))
     recovery = None
     if args.recovery_snapshot:
         try:
@@ -62,17 +63,31 @@ def main(
         source_snapshot_id=args.source_snapshot_id,
     )
     if args.report:
-        result.setdefault("report_paths", []).append(str(args.report))
+        report_paths = result.get("report_paths")
+        if report_paths is None:
+            report_paths = []
+            result["report_paths"] = report_paths
+        if not isinstance(report_paths, list):
+            return _delivery_failure_code(
+                "FAILED", "report delivery failed: report_paths is not a list"
+            )
+        report_paths.append(str(args.report))
         result["report_schema_version"] = REPORT_SCHEMA_VERSION
         result["report_format"] = args.report_format
         try:
             reporter_factory().write(result, args.report, args.report_format)
         except (OSError, ValueError, TypeError) as exc:
+            detail = f": {exc}" if isinstance(exc, TypeError) else ""
             return _delivery_failure_code(
-                result.get("status", "FAILED"),
-                f"report delivery failed: {type(exc).__name__}",
+                _result_status(result),
+                f"report delivery failed: {type(exc).__name__}{detail}",
             )
-    return EXIT_CODES.get(result.get("status"), 1)
+    return EXIT_CODES.get(_result_status(result), 1)
+
+
+def _result_status(result: dict[str, object]) -> str:
+    status = result.get("status", "FAILED")
+    return status if isinstance(status, str) else "FAILED"
 
 
 def _delivery_failure_code(status: str, error: str) -> int:

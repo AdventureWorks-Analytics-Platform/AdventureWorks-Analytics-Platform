@@ -17,7 +17,13 @@ class BronzeLoader:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
 
-    def load(self, df: pd.DataFrame, target_schema: str, target_table: str, if_exists: str = "replace") -> Tuple[int, bool]:
+    def load(
+        self,
+        df: pd.DataFrame,
+        target_schema: str,
+        target_table: str,
+        if_exists: str = "replace",
+    ) -> Tuple[int, bool]:
         with PostgreSQLConnector(settings=self.settings) as pg_conn:
             with pg_conn.connection.cursor() as cursor:
                 cursor.execute(

@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     bronze_rejected_threshold: int = Field(default=0, ge=0)
     silver_rejected_threshold: int = Field(default=0, ge=0)
     silver_transform_version: str = "silver-v1"
-    silver_sql_dedup_enabled: bool = False
+    silver_sql_dedup_enabled: bool = True
     retry_max_attempts: int = Field(default=3, ge=1, le=3)
     retry_initial_delay_seconds: float = Field(default=1.0, gt=0)
     retry_max_delay_seconds: float = Field(default=30.0, gt=0)

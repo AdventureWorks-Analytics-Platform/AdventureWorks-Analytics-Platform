@@ -54,7 +54,9 @@ class ConnectionHealthService:
             ),
         ]
 
-        overall_status = "ok" if all(item["status"] == "ok" for item in results) else "degraded"
+        overall_status = (
+            "ok" if all(item["status"] == "ok" for item in results) else "degraded"
+        )
         return {
             "phase": "pre_bootstrap",
             "status": overall_status,

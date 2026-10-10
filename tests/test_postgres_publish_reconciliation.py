@@ -11,7 +11,10 @@ from src.shared.ingestion.postgres_reconciliation_service import (
 from src.shared.ingestion.postgres_ingestion_schema import ensure_ingestion_schema
 
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.postgres_integration,
+]
 
 
 TARGET = "w4_atomic_publish"

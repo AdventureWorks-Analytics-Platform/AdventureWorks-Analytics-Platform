@@ -1,8 +1,9 @@
 from datetime import datetime
 import hashlib
 import inspect
+import logging
 import time
-from typing import Callable, Dict, Iterable, Optional, TypeVar
+from typing import Any, Callable, Dict, Iterable, Optional, Protocol
 
 import pandas as pd
 
@@ -12,8 +13,10 @@ from src.shared.ingestion.audit_service import AuditService
 from src.shared.ingestion.ingestion_models import (
     BatchLoadAudit,
     ExecutionIdentity,
+    ExtractionBatch,
     IngestionResult,
     IngestionStatus,
+    RejectedRecord,
     RunAudit,
     TableLoadAudit,
     deterministic_batch_id,
@@ -22,9 +25,87 @@ from src.shared.ingestion.ingestion_models import (
 from src.shared.ingestion.reconciliation_service import ReconciliationService
 from src.shared.ingestion.retry_policy import RetryPolicy, execute_with_retry
 from src.shared.ingestion.quarantine_service import QuarantineService
+from src.shared.observability.structured_logging import emit_event
 from src.shared.ingestion.staging_manager import StagingManager
 
-Component = TypeVar("Component")
+
+logger = logging.getLogger(__name__)
+
+
+def _validation_issues(report: dict[str, object]) -> list[str]:
+    issues = report.get("issues", [])
+    if not isinstance(issues, list) or not all(
+        isinstance(issue, str) for issue in issues
+    ):
+        raise TypeError("validation report issues must be a list of strings")
+    return issues
+
+
+class TableExtractor(Protocol):
+    def iter_table_batches(
+        self,
+        spec: TableSpec,
+        load_date: datetime,
+        *,
+        legacy_query: bool = False,
+        start_after: object | None = None,
+    ) -> Iterable[ExtractionBatch]: ...
+
+
+class TableLoader(Protocol):
+    def load(
+        self,
+        dataframe: pd.DataFrame,
+        target_schema: str,
+        target_table: str,
+        if_exists: str = "replace",
+    ) -> tuple[int, bool]: ...
+
+    def load_batch_transactionally(
+        self,
+        dataframe: pd.DataFrame,
+        target_schema: str,
+        target_table: str,
+        batch_id: str,
+        upper_bound: object,
+        checkpoint_manager: Any,
+        content_hash: str | None = None,
+        if_exists: str = "append",
+    ) -> tuple[int, bool]: ...
+
+
+class TableValidator(Protocol):
+    def partition_rows(
+        self,
+        dataframe: pd.DataFrame,
+        spec: TableSpec,
+        identity: ExecutionIdentity,
+    ) -> tuple[pd.DataFrame, tuple[RejectedRecord, ...]]: ...
+
+    def validate_staging(
+        self,
+        dataframe: pd.DataFrame,
+        spec: TableSpec,
+        source_count: int,
+        rejected_count: int = 0,
+        rejected_threshold: int | None = None,
+    ) -> dict[str, object]: ...
+
+
+class AuditRepository(Protocol):
+    def record_run(self, audit: RunAudit) -> RunAudit: ...
+
+    def record_batch(self, audit: BatchLoadAudit) -> BatchLoadAudit: ...
+
+    def record_table_load(self, audit: TableLoadAudit) -> TableLoadAudit: ...
+
+    def batches_for_load(self, load_id: str) -> tuple[BatchLoadAudit, ...]: ...
+
+    def get_table_load(self, load_id: str) -> TableLoadAudit | None: ...
+
+
+class QuarantineRepository(Protocol):
+    def record(self, rejected_record: RejectedRecord) -> RejectedRecord: ...
 
 
 class DomainBronzeJob:
@@ -33,15 +114,15 @@ class DomainBronzeJob:
     def __init__(
         self,
         table_specs: Iterable[TableSpec],
-        extractor_factory: Callable[..., Component],
-        loader_factory: Callable[..., Component],
-        validator_factory: Callable[..., Component],
+        extractor_factory: Callable[..., TableExtractor],
+        loader_factory: Callable[..., TableLoader],
+        validator_factory: Callable[..., TableValidator],
         settings: Optional[Settings] = None,
         staging_manager: StagingManager | None = None,
-        audit_service: AuditService | None = None,
+        audit_service: AuditRepository | None = None,
         retry_policy: RetryPolicy | None = None,
         sleeper: Callable[[float], None] | None = None,
-        quarantine_service: QuarantineService | None = None,
+        quarantine_service: QuarantineRepository | None = None,
         rejected_threshold: int | None = None,
         reconciliation_service=None,
         publish_service=None,
@@ -66,7 +147,9 @@ class DomainBronzeJob:
         )
         self.publish_service = publish_service
         self.checkpoint_manager = checkpoint_manager
-        self.staging_reader = staging_reader or getattr(self.loader, "read_staging", None)
+        self.staging_reader = staging_reader or getattr(
+            self.loader, "read_staging", None
+        )
         self.quarantine_service = quarantine_service or QuarantineService()
         self.rejected_threshold = (
             self.settings.bronze_rejected_threshold
@@ -102,6 +185,16 @@ class DomainBronzeJob:
             )
             started_at = utc_now()
             table_started_clock = time.perf_counter()
+            emit_event(
+                logger,
+                logging.INFO,
+                "table.started",
+                run_id=table_identity.run_id,
+                load_id=table_identity.load_id,
+                stage="bronze",
+                source_table=spec.source_name,
+                target_table=spec.target_name,
+            )
             self.audit_service.record_run(
                 RunAudit(
                     table_identity.run_id,
@@ -120,7 +213,9 @@ class DomainBronzeJob:
                     started_at,
                 )
             )
-            existing_frame = self._read_existing_staging(staging.name, spec, is_resuming)
+            existing_frame = self._read_existing_staging(
+                staging.name, spec, is_resuming
+            )
             rows_read = self._prior_count(resume_load_id, "rows_read")
             rows_written = self._prior_count(resume_load_id, "rows_written")
             rows_rejected = self._prior_count(resume_load_id, "rows_rejected")
@@ -129,11 +224,19 @@ class DomainBronzeJob:
                 batch_frames.append(existing_frame)
             success = True
             attempt_count = 1
-            batch_error = None
-            prior_batch_count = len(self.audit_service.batches_for_load(resume_load_id)) if resume_load_id else 0
+            batch_error: Exception | None = None
+            prior_batch_count = (
+                len(self.audit_service.batches_for_load(resume_load_id))
+                if resume_load_id
+                else 0
+            )
             for batch in self._iter_table_batches(spec, load_date, resume_after):
                 batch_started_clock = time.perf_counter()
                 effective_batch_number = batch.batch_number + prior_batch_count
+                if spec.ordering_key is None:
+                    raise ValueError(
+                        "TableSpec ordering_key is required for batch ingestion"
+                    )
                 batch_id = deterministic_batch_id(
                     spec.source_name,
                     spec.ordering_key,
@@ -143,13 +246,19 @@ class DomainBronzeJob:
                 )
                 content_hash = self._content_hash(batch.dataframe)
                 rows_read += batch.row_count
-                if _elapsed_seconds(table_started_clock) > self.settings.bronze_table_timeout_seconds:
+                if (
+                    _elapsed_seconds(table_started_clock)
+                    > self.settings.bronze_table_timeout_seconds
+                ):
                     success = False
                     batch_error = TimeoutError(
                         f"Bronze table timeout exceeded for {spec.source_name}"
                     )
                     break
-                if _elapsed_seconds(batch_started_clock) > self.settings.bronze_batch_timeout_seconds:
+                if (
+                    _elapsed_seconds(batch_started_clock)
+                    > self.settings.bronze_batch_timeout_seconds
+                ):
                     success = False
                     batch_error = TimeoutError(
                         f"Bronze batch timeout exceeded for {spec.source_name}: "
@@ -172,8 +281,16 @@ class DomainBronzeJob:
                             batch_id=batch_id,
                             load_id=table_identity.load_id,
                             batch_number=effective_batch_number,
-                            lower_bound=str(batch.lower_bound) if batch.lower_bound is not None else None,
-                            upper_bound=str(batch.upper_bound) if batch.upper_bound is not None else None,
+                            lower_bound=(
+                                str(batch.lower_bound)
+                                if batch.lower_bound is not None
+                                else None
+                            ),
+                            upper_bound=(
+                                str(batch.upper_bound)
+                                if batch.upper_bound is not None
+                                else None
+                            ),
                             rows_read=batch.row_count,
                             rows_written=0,
                             rows_rejected=0,
@@ -204,8 +321,16 @@ class DomainBronzeJob:
                             batch_id=batch_id,
                             load_id=table_identity.load_id,
                             batch_number=effective_batch_number,
-                            lower_bound=str(batch.lower_bound) if batch.lower_bound is not None else None,
-                            upper_bound=str(batch.upper_bound) if batch.upper_bound is not None else None,
+                            lower_bound=(
+                                str(batch.lower_bound)
+                                if batch.lower_bound is not None
+                                else None
+                            ),
+                            upper_bound=(
+                                str(batch.upper_bound)
+                                if batch.upper_bound is not None
+                                else None
+                            ),
                             rows_read=batch.row_count,
                             rows_written=0,
                             rows_rejected=batch_rejected,
@@ -236,6 +361,19 @@ class DomainBronzeJob:
                         )
 
                         def on_retry(attempt, delay, error):
+                            emit_event(
+                                logger,
+                                logging.WARNING,
+                                "batch.retrying",
+                                run_id=table_identity.run_id,
+                                load_id=table_identity.load_id,
+                                batch_id=batch_id,
+                                stage="bronze",
+                                source_table=spec.source_name,
+                                target_table=spec.target_name,
+                                attempt=attempt,
+                                error_type=type(error).__name__,
+                            )
                             self.audit_service.record_run(
                                 RunAudit(
                                     table_identity.run_id,
@@ -250,39 +388,59 @@ class DomainBronzeJob:
                         staging_schema = getattr(
                             self.loader, "staging_schema", spec.target_schema
                         )
-                        if (
-                            self.checkpoint_manager is not None
-                            and hasattr(self.loader, "load_batch_transactionally")
+                        if self.checkpoint_manager is not None and hasattr(
+                            self.loader, "load_batch_transactionally"
                         ):
-                            load_operation = lambda: self.loader.load_batch_transactionally(
-                                valid_dataframe,
-                                staging_schema,
-                                staging.name,
-                                batch_id,
-                                batch.upper_bound,
-                                self.checkpoint_manager,
-                                content_hash,
-                                "append" if is_resuming or effective_batch_number > 1 else "replace",
-                            )
+
+                            def load_operation():
+                                return self.loader.load_batch_transactionally(
+                                    valid_dataframe,
+                                    staging_schema,
+                                    staging.name,
+                                    batch_id,
+                                    batch.upper_bound,
+                                    self.checkpoint_manager,
+                                    content_hash,
+                                    (
+                                        "append"
+                                        if is_resuming or effective_batch_number > 1
+                                        else "replace"
+                                    ),
+                                )
+
                         else:
-                            load_operation = lambda: self.loader.load(
-                                valid_dataframe,
-                                staging_schema,
-                                staging.name,
-                                if_exists="append" if is_resuming or effective_batch_number > 1 else "replace",
+
+                            def load_operation():
+                                return self.loader.load(
+                                    valid_dataframe,
+                                    staging_schema,
+                                    staging.name,
+                                    if_exists=(
+                                        "append"
+                                        if is_resuming or effective_batch_number > 1
+                                        else "replace"
+                                    ),
+                                )
+
+                        (written, batch_success), batch_attempts, _ = (
+                            execute_with_retry(
+                                load_operation,
+                                self.retry_policy,
+                                self.sleeper,
+                                on_retry=on_retry,
                             )
-                        (written, batch_success), batch_attempts, _ = execute_with_retry(
-                            load_operation,
-                            self.retry_policy,
-                            self.sleeper,
-                            on_retry=on_retry,
                         )
-                        if _elapsed_seconds(batch_started_clock) > self.settings.bronze_batch_timeout_seconds:
+                        if (
+                            _elapsed_seconds(batch_started_clock)
+                            > self.settings.bronze_batch_timeout_seconds
+                        ):
                             raise TimeoutError(
                                 f"Bronze batch timeout exceeded for {spec.source_name}: "
                                 f"batch_number={batch.batch_number}"
                             )
-                    except Exception as error:  # noqa: BLE001 - result boundary records failure
+                    except (
+                        Exception
+                    ) as error:  # noqa: BLE001 - result boundary records failure
                         written, batch_success = 0, False
                         batch_attempts = self.retry_policy.max_attempts
                         batch_error = error
@@ -304,17 +462,47 @@ class DomainBronzeJob:
                         batch_id=batch_id,
                         load_id=table_identity.load_id,
                         batch_number=effective_batch_number,
-                        lower_bound=str(batch.lower_bound) if batch.lower_bound is not None else None,
-                        upper_bound=str(batch.upper_bound) if batch.upper_bound is not None else None,
+                        lower_bound=(
+                            str(batch.lower_bound)
+                            if batch.lower_bound is not None
+                            else None
+                        ),
+                        upper_bound=(
+                            str(batch.upper_bound)
+                            if batch.upper_bound is not None
+                            else None
+                        ),
                         rows_read=batch.row_count,
                         rows_written=written,
                         rows_rejected=batch_rejected,
                         attempt_count=batch_attempts,
-                        status=(IngestionStatus.SUCCESS if batch_success else IngestionStatus.FAILED),
+                        status=(
+                            IngestionStatus.SUCCESS
+                            if batch_success
+                            else IngestionStatus.FAILED
+                        ),
                         committed_at=utc_now() if batch_success else None,
                         content_hash=content_hash,
                         duration_ms=_duration_ms(batch_started_clock),
                     )
+                )
+                emit_event(
+                    logger,
+                    logging.INFO if batch_success else logging.ERROR,
+                    "batch.completed" if batch_success else "batch.failed",
+                    run_id=table_identity.run_id,
+                    load_id=table_identity.load_id,
+                    batch_id=batch_id,
+                    stage="bronze",
+                    source_table=spec.source_name,
+                    target_table=spec.target_name,
+                    attempt=batch_attempts,
+                    status=("SUCCESS" if batch_success else "FAILED"),
+                    duration_ms=_duration_ms(batch_started_clock),
+                    rows_read=batch.row_count,
+                    rows_written=written,
+                    rows_rejected=batch_rejected,
+                    error_type=type(batch_error).__name__ if batch_error else None,
                 )
                 if not batch_success:
                     break
@@ -335,7 +523,9 @@ class DomainBronzeJob:
                     stage="bronze",
                     source_table=spec.source_name,
                     target_table=spec.target_name,
-                    status=(IngestionStatus.SUCCESS if success else IngestionStatus.FAILED),
+                    status=(
+                        IngestionStatus.SUCCESS if success else IngestionStatus.FAILED
+                    ),
                     rows_read=rows_read,
                     rows_written=rows_written,
                     rows_rejected=rows_rejected,
@@ -364,10 +554,15 @@ class DomainBronzeJob:
                         rejected_count=rows_rejected,
                         rejected_threshold=self.rejected_threshold,
                     )
-                    validation_ok = validation_report["validation_passed"]
+                    validation_passed = validation_report.get("validation_passed")
+                    if not isinstance(validation_passed, bool):
+                        raise TypeError(
+                            "validation report validation_passed must be a boolean"
+                        )
+                    validation_ok = validation_passed
                     if not validation_ok:
                         error_type = "ValidationError"
-                        error_message = "; ".join(validation_report.get("issues", []))
+                        error_message = "; ".join(_validation_issues(validation_report))
                     if validation_ok:
                         self.staging_manager.mark_validated(
                             staging.name, validation_report
@@ -387,7 +582,9 @@ class DomainBronzeJob:
                                 started_at,
                             )
                         )
-                except Exception as error:  # noqa: BLE001 - result boundary records failure
+                except (
+                    Exception
+                ) as error:  # noqa: BLE001 - result boundary records failure
                     error_type = type(error).__name__
                     error_message = str(error)
             elif not batch_frames:
@@ -397,12 +594,14 @@ class DomainBronzeJob:
                     "issues": (
                         ["Source returned zero rows; publish was skipped"]
                         if rows_read == 0
-                        else ["No valid rows remained after quarantine; publish was skipped"]
+                        else [
+                            "No valid rows remained after quarantine; publish was skipped"
+                        ]
                     ),
                 }
                 if rows_read and batch_error is None:
                     error_type = "ValidationError"
-                    error_message = validation_report["issues"][0]
+                    error_message = _validation_issues(validation_report)[0]
 
             if not success or (rows_read and not validation_ok):
                 self.staging_manager.mark_failed(staging.name)
@@ -448,6 +647,39 @@ class DomainBronzeJob:
                 }
             )
             results[spec.target_table] = result
+            emit_event(
+                logger,
+                (
+                    logging.INFO
+                    if status
+                    in {
+                        IngestionStatus.SUCCESS,
+                        IngestionStatus.SUCCESS_WITH_REJECTIONS,
+                    }
+                    else logging.ERROR
+                ),
+                (
+                    "table.completed"
+                    if status
+                    in {
+                        IngestionStatus.SUCCESS,
+                        IngestionStatus.SUCCESS_WITH_REJECTIONS,
+                    }
+                    else "table.failed"
+                ),
+                run_id=table_identity.run_id,
+                load_id=table_identity.load_id,
+                batch_id=table_identity.batch_id or None,
+                stage="bronze",
+                source_table=spec.source_name,
+                target_table=spec.target_name,
+                status=status.value,
+                duration_ms=result["duration_ms"],
+                rows_read=rows_read,
+                rows_written=rows_written,
+                rows_rejected=rows_rejected,
+                error_type=error_type,
+            )
             self.audit_service.record_run(
                 RunAudit(
                     table_identity.run_id,
@@ -482,17 +714,27 @@ class DomainBronzeJob:
             raise RuntimeError("Checkpoint manager is required for Bronze resume")
         batches = self.audit_service.batches_for_load(load_id)
         checkpoint = self.checkpoint_manager.latest_for_load(
-            [batch.batch_id for batch in batches if batch.status is IngestionStatus.SUCCESS]
+            [
+                batch.batch_id
+                for batch in batches
+                if batch.status is IngestionStatus.SUCCESS
+            ]
         )
         if checkpoint is None:
-            raise RuntimeError(f"No committed checkpoint found for Bronze load_id: {load_id}")
+            raise RuntimeError(
+                f"No committed checkpoint found for Bronze load_id: {load_id}"
+            )
         return checkpoint.upper_bound
 
-    def _read_existing_staging(self, staging_name: str, spec: TableSpec, is_resuming: bool):
+    def _read_existing_staging(
+        self, staging_name: str, spec: TableSpec, is_resuming: bool
+    ):
         if not is_resuming:
             return pd.DataFrame()
         if self.staging_reader is None:
-            raise RuntimeError("Staging reader is required for Bronze resume validation")
+            raise RuntimeError(
+                "Staging reader is required for Bronze resume validation"
+            )
         return self.staging_reader(staging_name, spec)
 
     def _prior_count(self, load_id: str | None, field: str) -> int:

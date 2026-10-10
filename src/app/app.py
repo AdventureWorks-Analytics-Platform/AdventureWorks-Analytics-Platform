@@ -1,8 +1,9 @@
-import json
 import logging
 
 from src.jobs.platform_bootstrap import PlatformBootstrapJob
-from src.features.Sales_Performance.jobs.sales_bronze_ingestion_job import SalesBronzeIngestionJob
+from src.features.Sales_Performance.jobs.sales_bronze_ingestion_job import (
+    SalesBronzeIngestionJob,
+)
 from src.features.Person.jobs.person_bronze_job import PersonBronzeJob
 from src.features.Production.jobs.production_bronze_job import ProductionBronzeJob
 from src.app.bronze_to_silver_pipeline import BronzeToSilverPipeline
@@ -15,8 +16,8 @@ from src.shared.ingestion.postgres_publish_service import (
 )
 from scripts.warehouse.postgres.gold.sales_gold_load import _build_default_gold_job
 from src.shared.services.connection_health_service import ConnectionHealthService
-from src.shared.security.log_redaction import redact_log_message
 from src.core.settings import Settings, get_settings
+from src.shared.observability.structured_logging import emit_event
 
 
 class SilverGoldPipeline:
@@ -42,13 +43,17 @@ class SilverGoldPipeline:
     def _summary(self, silver_result, status, gold_called):
         table_results = self._table_results(silver_result)
         return {
-            "event": "silver_gold_pipeline",
+            "event": "stage.completed",
             "stage": "silver_gate",
             "status": status,
             "table_count": len(table_results),
             "rows_read": sum(result.get("rows_read", 0) for result in table_results),
-            "rows_written": sum(result.get("rows_written", 0) for result in table_results),
-            "rows_rejected": sum(result.get("rows_rejected", 0) for result in table_results),
+            "rows_written": sum(
+                result.get("rows_written", 0) for result in table_results
+            ),
+            "rows_rejected": sum(
+                result.get("rows_rejected", 0) for result in table_results
+            ),
             "rows_deduplicated": sum(
                 result.get("rows_deduplicated", 0) for result in table_results
             ),
@@ -64,7 +69,21 @@ class SilverGoldPipeline:
         )
         gate_status = "SUCCESS" if silver_ok else "FAILED"
         summary = self._summary(silver_result, gate_status, False)
-        self.logger.info(redact_log_message(json.dumps(summary, sort_keys=True)))
+        first_table = table_results[0] if table_results else {}
+        emit_event(
+            self.logger,
+            logging.INFO if silver_ok else logging.ERROR,
+            "stage.completed" if silver_ok else "stage.failed",
+            run_id=first_table.get("run_id"),
+            load_id=first_table.get("load_id"),
+            stage="silver_gate",
+            status=gate_status,
+            table_count=summary["table_count"],
+            rows_read=summary["rows_read"],
+            rows_written=summary["rows_written"],
+            rows_rejected=summary["rows_rejected"],
+            rows_deduplicated=summary["rows_deduplicated"],
+        )
 
         if not silver_ok:
             return {
@@ -77,7 +96,6 @@ class SilverGoldPipeline:
 
         gold_result = self.gold_job.run()
         summary = self._summary(silver_result, "SUCCESS", True)
-        self.logger.info(redact_log_message(json.dumps(summary, sort_keys=True)))
         return {
             "status": "SUCCESS",
             "silver": silver_result,
@@ -140,7 +158,9 @@ class App:
         result = runner.run(mode="full")
         return {
             **result,
-            "status": "ok"
-            if result["status"] in {"SUCCESS", "SUCCESS_WITH_REJECTIONS"}
-            else "degraded",
+            "status": (
+                "ok"
+                if result["status"] in {"SUCCESS", "SUCCESS_WITH_REJECTIONS"}
+                else "degraded"
+            ),
         }

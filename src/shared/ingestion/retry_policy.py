@@ -55,7 +55,11 @@ class RetryPolicy:
             self.max_delay_seconds,
             self.initial_delay_seconds * (2 ** max(attempt - 1, 0)),
         )
-        jitter = random.uniform(0, self.jitter_ratio) if random_value is None else random_value
+        jitter = (
+            random.uniform(0, self.jitter_ratio)
+            if random_value is None
+            else random_value
+        )
         return min(self.max_delay_seconds, base * (1 + jitter))
 
 
@@ -65,17 +69,22 @@ def execute_with_retry(
     sleeper: Callable[[float], None],
     on_retry: Callable[[int, float, BaseException], None] | None = None,
 ) -> tuple[T, int, IngestionStatus]:
-    last_error = None
+    last_error: Exception | None = None
     for attempt in range(1, policy.max_attempts + 1):
         try:
             return operation(), attempt, IngestionStatus.SUCCESS
         except Exception as error:  # noqa: BLE001 - classifier decides retryability
             last_error = error
-            if classify_error(error) != ErrorClass.TRANSIENT or attempt == policy.max_attempts:
+            if (
+                classify_error(error) != ErrorClass.TRANSIENT
+                or attempt == policy.max_attempts
+            ):
                 raise
             delay = policy.delay_seconds(attempt)
             if on_retry:
                 on_retry(attempt, delay, error)
             sleeper(delay)
 
+    if last_error is None:
+        raise RuntimeError("retry policy completed without an operation result")
     raise last_error

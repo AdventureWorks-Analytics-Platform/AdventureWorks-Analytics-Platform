@@ -118,16 +118,26 @@ class PostgresAuditService:
                     error_type = EXCLUDED.error_type,
                     error_message = EXCLUDED.error_message
                 """,
-                (audit.run_id, audit.pipeline_name, audit.mode, audit.status.value,
-                 audit.started_at, audit.finished_at, audit.error_count,
-                 audit.error_type, audit.error_message),
+                (
+                    audit.run_id,
+                    audit.pipeline_name,
+                    audit.mode,
+                    audit.status.value,
+                    audit.started_at,
+                    audit.finished_at,
+                    audit.error_count,
+                    audit.error_type,
+                    audit.error_message,
+                ),
             )
         return audit
 
     def reconcile_stale_runs(
         self, stale_after_seconds: int | None = None, now: datetime | None = None
     ) -> list[str]:
-        threshold = stale_after_seconds or self.settings.bronze_stale_run_timeout_seconds
+        threshold = (
+            stale_after_seconds or self.settings.bronze_stale_run_timeout_seconds
+        )
         with PostgreSQLConnector(settings=self.settings) as connection:
             rows = connection.fetch_results(
                 """
@@ -168,11 +178,23 @@ class PostgresAuditService:
                     finished_at = EXCLUDED.finished_at,
                     duration_ms = EXCLUDED.duration_ms
                 """,
-                (audit.load_id, audit.run_id, audit.stage, audit.source_table,
-                 audit.target_table, audit.status.value, audit.rows_read,
-                 audit.rows_written, audit.rows_rejected, audit.attempt_count,
-                 audit.error_type, audit.error_message, audit.started_at,
-                 audit.finished_at, audit.duration_ms),
+                (
+                    audit.load_id,
+                    audit.run_id,
+                    audit.stage,
+                    audit.source_table,
+                    audit.target_table,
+                    audit.status.value,
+                    audit.rows_read,
+                    audit.rows_written,
+                    audit.rows_rejected,
+                    audit.attempt_count,
+                    audit.error_type,
+                    audit.error_message,
+                    audit.started_at,
+                    audit.finished_at,
+                    audit.duration_ms,
+                ),
             )
         return audit
 
@@ -200,11 +222,21 @@ class PostgresAuditService:
                     duration_ms = EXCLUDED.duration_ms
                 WHERE bronze.batch_load_audit.status <> 'SUCCESS'
                 """,
-                (audit.batch_id, audit.load_id, audit.batch_number,
-                 audit.lower_bound, audit.upper_bound, audit.rows_read,
-                 audit.rows_written, audit.rows_rejected, audit.attempt_count,
-                 audit.status.value, audit.committed_at, audit.content_hash,
-                 audit.duration_ms),
+                (
+                    audit.batch_id,
+                    audit.load_id,
+                    audit.batch_number,
+                    audit.lower_bound,
+                    audit.upper_bound,
+                    audit.rows_read,
+                    audit.rows_written,
+                    audit.rows_rejected,
+                    audit.attempt_count,
+                    audit.status.value,
+                    audit.committed_at,
+                    audit.content_hash,
+                    audit.duration_ms,
+                ),
             )
             if cursor.rowcount == 0:
                 raise ValueError(f"batch audit already exists: {audit.batch_id}")
@@ -238,9 +270,14 @@ class PostgresAuditService:
             return None
         row = rows[0]
         return RunAudit(
-            run_id=row[0], pipeline_name=row[1], mode=row[2],
-            status=IngestionStatus(row[3]), started_at=row[4],
-            finished_at=row[5], error_count=row[6], error_type=row[7],
+            run_id=row[0],
+            pipeline_name=row[1],
+            mode=row[2],
+            status=IngestionStatus(row[3]),
+            started_at=row[4],
+            finished_at=row[5],
+            error_count=row[6],
+            error_type=row[7],
             error_message=row[8],
         )
 
@@ -260,18 +297,36 @@ class PostgresAuditService:
             return None
         row = rows[0]
         return TableLoadAudit(
-            load_id=row[0], run_id=row[1], stage=row[2], source_table=row[3],
-            target_table=row[4], status=IngestionStatus(row[5]), rows_read=row[6],
-            rows_written=row[7], rows_rejected=row[8], attempt_count=row[9],
-            error_type=row[10], error_message=row[11], started_at=row[12],
-            finished_at=row[13], duration_ms=row[14],
+            load_id=row[0],
+            run_id=row[1],
+            stage=row[2],
+            source_table=row[3],
+            target_table=row[4],
+            status=IngestionStatus(row[5]),
+            rows_read=row[6],
+            rows_written=row[7],
+            rows_rejected=row[8],
+            attempt_count=row[9],
+            error_type=row[10],
+            error_message=row[11],
+            started_at=row[12],
+            finished_at=row[13],
+            duration_ms=row[14],
         )
 
     def _batch_from_row(self, row) -> BatchLoadAudit:
         return BatchLoadAudit(
-            batch_id=row[0], load_id=row[1], batch_number=row[2],
-            lower_bound=row[3], upper_bound=row[4], rows_read=row[5],
-            rows_written=row[6], rows_rejected=row[7], attempt_count=row[8],
-            status=IngestionStatus(row[9]), committed_at=row[10],
-            content_hash=row[11], duration_ms=row[12],
+            batch_id=row[0],
+            load_id=row[1],
+            batch_number=row[2],
+            lower_bound=row[3],
+            upper_bound=row[4],
+            rows_read=row[5],
+            rows_written=row[6],
+            rows_rejected=row[7],
+            attempt_count=row[8],
+            status=IngestionStatus(row[9]),
+            committed_at=row[10],
+            content_hash=row[11],
+            duration_ms=row[12],
         )

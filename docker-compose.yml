@@ -5,9 +5,9 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DATABASE:-adventureworks_warehouse}
       POSTGRES_USER: ${POSTGRES_USERNAME:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env before starting PostgreSQL}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/warehouse/postgres/init/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro

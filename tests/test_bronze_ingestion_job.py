@@ -73,7 +73,10 @@ def test_sales_extractor_converts_row_objects_to_tuples(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    monkeypatch.setattr("src.features.Sales_Performance.domain.bronze.sales_extractor.SQLServerConnector", FakeSQLConnector)
+    monkeypatch.setattr(
+        "src.features.Sales_Performance.domain.bronze.sales_extractor.SQLServerConnector",
+        FakeSQLConnector,
+    )
 
     df = SalesExtractor().extract_table("Sales", "SalesOrderHeader")
 
@@ -128,7 +131,10 @@ def test_sales_extractor_adds_record_hash_lineage(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    monkeypatch.setattr("src.features.Sales_Performance.domain.bronze.sales_extractor.SQLServerConnector", FakeSQLConnector)
+    monkeypatch.setattr(
+        "src.features.Sales_Performance.domain.bronze.sales_extractor.SQLServerConnector",
+        FakeSQLConnector,
+    )
 
     df = SalesExtractor().extract_table("Sales", "SalesOrderHeader")
 

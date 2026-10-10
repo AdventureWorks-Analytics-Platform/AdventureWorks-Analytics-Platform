@@ -26,12 +26,17 @@ def test_settings_parse_types_and_keep_password_out_of_safe_summary():
     assert "warehouse-secret" not in str(settings.safe_summary())
 
 
-def test_silver_sql_dedup_disabled_by_default():
+def test_silver_sql_dedup_enabled_by_default():
     settings = make_settings()
 
-    assert settings.silver_sql_dedup_enabled is False
-    assert settings.safe_summary()["silver_sql_dedup_enabled"] is False
+    assert settings.silver_sql_dedup_enabled is True
+    assert settings.safe_summary()["silver_sql_dedup_enabled"] is True
 
+
+def test_silver_sql_dedup_can_be_disabled_explicitly():
+    settings = make_settings(silver_sql_dedup_enabled=False)
+
+    assert settings.silver_sql_dedup_enabled is False
 
 
 def test_settings_environment_override(monkeypatch):

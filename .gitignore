@@ -32,3 +32,13 @@ Thumbs.db
 
 # Ignore test files and directories
 tests/
+
+# Keep the PostgreSQL integration evidence used by CI in source control.
+!tests/
+tests/*
+!tests/test_postgres_gold_candidate_integration.py
+!tests/test_postgres_gold_constraints_integration.py
+!tests/test_postgres_gold_publish_integration.py
+!tests/test_postgres_gold_reconciliation_integration.py
+!tests/test_postgres_gold_streaming_integration.py
+!tests/test_postgres_silver_sql_dedup_validator_integration.py

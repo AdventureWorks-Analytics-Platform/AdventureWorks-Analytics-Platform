@@ -42,8 +42,17 @@ def test_silver_job_is_injectable_and_preserves_dependency_order():
     ]
 
 
+def test_default_silver_writer_fails_closed_without_database_write():
+    job = SilverTransformationJob()
+
+    with pytest.raises(RuntimeError, match="without a publish_service or custom writer"):
+        job._default_writer(pd.DataFrame({"sample_id": [1]}), "sample_clean")
+
+
 def test_legacy_run_delegates_to_sales_silver_job(monkeypatch):
-    captured = {"called": False}
+    captured = {"called": False, "kwargs": None}
+    dedup_service = object()
+    sql_validator = object()
 
     class DummyJob:
         def run(self):
@@ -51,12 +60,20 @@ def test_legacy_run_delegates_to_sales_silver_job(monkeypatch):
 
     def fake_builder(*args, **kwargs):
         captured["called"] = True
+        captured["kwargs"] = kwargs
         return DummyJob()
 
     monkeypatch.setattr(sales_silver_clean, "SalesSilverJob", fake_builder)
+    monkeypatch.setattr(
+        sales_silver_clean,
+        "build_silver_sql_dedup_kwargs",
+        lambda: {"dedup_service": dedup_service, "sql_validator": sql_validator},
+    )
 
     assert sales_silver_clean.run() == {"status": "delegated"}
     assert captured["called"] is True
+    assert captured["kwargs"]["dedup_service"] is dedup_service
+    assert captured["kwargs"]["sql_validator"] is sql_validator
 
 
 def test_missing_person_dependency_fails_closed():
@@ -869,5 +886,3 @@ def test_silver_job_sql_validator_requires_publish_service():
 
     with pytest.raises(RuntimeError, match="sql_validator requires publish_service"):
         job.run()
-
-

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
+from decimal import Decimal
+from enum import Enum
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 
 class PipelineReporter:
@@ -13,7 +18,7 @@ class PipelineReporter:
     @classmethod
     def render(cls, result: dict[str, Any], fmt: str) -> str:
         if fmt == "json":
-            return json.dumps(result, indent=2, sort_keys=True)
+            return json.dumps(result, indent=2, sort_keys=True, default=_json_default)
         if fmt == "markdown":
             return cls.to_markdown(result)
         raise ValueError(f"unsupported report format: {fmt}")
@@ -65,3 +70,15 @@ class PipelineReporter:
         if result.get("error"):
             lines.extend([f"Error: {result['error']}", ""])
         return "\n".join(lines)
+
+
+def _json_default(value: object) -> object:
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")

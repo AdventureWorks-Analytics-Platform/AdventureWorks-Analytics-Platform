@@ -7,6 +7,7 @@ from sqlalchemy.pool import StaticPool
 
 from src.core.settings import Settings, get_settings
 from src.shared.connectors.postgres_connector import PostgreSQLConnector
+from src.shared.ingestion.ingestion_models import TableSpec
 
 
 class PostgresPublishService:
@@ -105,8 +106,9 @@ class PostgresSilverPublishService(PostgresPublishService):
             cursor = connection.connection.cursor()
             try:
                 cursor.execute(
-                    sql.SQL("CREATE SCHEMA IF NOT EXISTS {}")
-                    .format(sql.Identifier(candidate_schema))
+                    sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                        sql.Identifier(candidate_schema)
+                    )
                 )
                 connection.connection.commit()
             except Exception:
@@ -119,8 +121,12 @@ class PostgresSilverPublishService(PostgresPublishService):
     def finalize_snapshot(self, candidate_schema: str, source_snapshot_id: str) -> str:
         self._validate_identifier(candidate_schema)
         required = {
-            "sales_order_header_clean", "sales_order_detail_clean", "customer_clean",
-            "sales_territory_clean", "product_clean", "sales_person_clean",
+            "sales_order_header_clean",
+            "sales_order_detail_clean",
+            "customer_clean",
+            "sales_territory_clean",
+            "product_clean",
+            "sales_person_clean",
         }
         with PostgreSQLConnector(settings=self.settings) as connection:
             cursor = connection.connection.cursor()
@@ -132,7 +138,9 @@ class PostgresSilverPublishService(PostgresPublishService):
                 )
                 missing = required - {row[0] for row in cursor.fetchall()}
                 if missing:
-                    raise ValueError(f"Silver candidate is incomplete: {sorted(missing)}")
+                    raise ValueError(
+                        f"Silver candidate is incomplete: {sorted(missing)}"
+                    )
                 cursor.execute(
                     "CREATE TABLE IF NOT EXISTS silver.silver_current_pointer ("
                     "pointer_id SMALLINT PRIMARY KEY CHECK (pointer_id = 1), "
@@ -164,8 +172,9 @@ class PostgresSilverPublishService(PostgresPublishService):
             cursor = connection.connection.cursor()
             try:
                 cursor.execute(
-                    sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE")
-                    .format(sql.Identifier(candidate_schema))
+                    sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        sql.Identifier(candidate_schema)
+                    )
                 )
                 connection.connection.commit()
             except Exception:
@@ -175,8 +184,12 @@ class PostgresSilverPublishService(PostgresPublishService):
                 cursor.close()
 
     def publish(
-        self, target_table: str, staging_table: str,
-        validation_report: dict | None = None, *, candidate_schema: str | None = None,
+        self,
+        target_table: str,
+        staging_table: str,
+        validation_report: dict | None = None,
+        *,
+        candidate_schema: str | None = None,
     ) -> str:
         if candidate_schema is None:
             return super().publish(target_table, staging_table, validation_report)
@@ -195,14 +208,18 @@ class PostgresSilverPublishService(PostgresPublishService):
                 if cursor.fetchone()[0] is None:
                     raise ValueError(f"staging table does not exist: {staging_table}")
                 cursor.execute(
-                    sql.SQL("ALTER TABLE {}.{} SET SCHEMA {}")
-                    .format(sql.Identifier(self.staging_schema), sql.Identifier(staging_table),
-                            sql.Identifier(candidate_schema))
+                    sql.SQL("ALTER TABLE {}.{} SET SCHEMA {}").format(
+                        sql.Identifier(self.staging_schema),
+                        sql.Identifier(staging_table),
+                        sql.Identifier(candidate_schema),
+                    )
                 )
                 cursor.execute(
-                    sql.SQL("ALTER TABLE {}.{} RENAME TO {}")
-                    .format(sql.Identifier(candidate_schema), sql.Identifier(staging_table),
-                            sql.Identifier(target_table))
+                    sql.SQL("ALTER TABLE {}.{} RENAME TO {}").format(
+                        sql.Identifier(candidate_schema),
+                        sql.Identifier(staging_table),
+                        sql.Identifier(target_table),
+                    )
                 )
                 connection.connection.commit()
             except Exception:
@@ -282,7 +299,9 @@ class PostgresSilverDedupService:
 
     staging_schema = "silver_staging"
 
-    def __init__(self, settings: Settings | None = None, staging_schema: str | None = None):
+    def __init__(
+        self, settings: Settings | None = None, staging_schema: str | None = None
+    ):
         self.settings = settings or get_settings()
         self.staging_schema = staging_schema or type(self).staging_schema
 
@@ -343,7 +362,9 @@ class PostgresSilverDedupService:
             finally:
                 cursor.close()
 
-    def set_source_snapshot_id(self, staging_table: str, source_snapshot_id: str) -> None:
+    def set_source_snapshot_id(
+        self, staging_table: str, source_snapshot_id: str
+    ) -> None:
         """Stamp every staged row with the run's snapshot id via SQL, no frame needed."""
         PostgresPublishService._validate_identifier(staging_table)
         with PostgreSQLConnector(settings=self.settings) as connection:
@@ -384,18 +405,26 @@ class PostgresSilverStagingValidator:
 
     staging_schema = "silver_staging"
     allowed_metadata_columns = {
-        "_source_system", "_source_table", "_load_date", "_record_hash",
-        "run_id", "load_id", "batch_id", "source_snapshot_id",
+        "_source_system",
+        "_source_table",
+        "_load_date",
+        "_record_hash",
+        "run_id",
+        "load_id",
+        "batch_id",
+        "source_snapshot_id",
     }
 
-    def __init__(self, settings: Settings | None = None, staging_schema: str | None = None):
+    def __init__(
+        self, settings: Settings | None = None, staging_schema: str | None = None
+    ):
         self.settings = settings or get_settings()
         self.staging_schema = staging_schema or type(self).staging_schema
 
     def validate(
         self,
         staging_table: str,
-        spec: object,
+        spec: TableSpec,
         source_count: int,
         rejected_count: int,
         rejected_threshold: int,
@@ -448,10 +477,15 @@ class PostgresSilverStagingValidator:
                     if null_key_count:
                         issues.append(f"NULL staging primary keys: {null_key_count}")
                     if duplicate_key_count:
-                        issues.append(f"Duplicate staging primary keys: {duplicate_key_count}")
+                        issues.append(
+                            f"Duplicate staging primary keys: {duplicate_key_count}"
+                        )
 
                 join_ok = True
-                if spec.source_table == "sales_person" and "salesperson_name" in columns:
+                if (
+                    spec.source_table == "sales_person"
+                    and "salesperson_name" in columns
+                ):
                     cursor.execute(
                         sql.SQL(
                             "SELECT count(*) FROM {schema}.{table} "
@@ -464,7 +498,9 @@ class PostgresSilverStagingValidator:
                     blank_count = int(cursor.fetchone()[0] or 0)
                     join_ok = blank_count == 0
                     if not join_ok:
-                        issues.append("sales_person Person join produced blank salesperson_name")
+                        issues.append(
+                            "sales_person Person join produced blank salesperson_name"
+                        )
             finally:
                 cursor.close()
 

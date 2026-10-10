@@ -4,6 +4,7 @@
 CREATE SCHEMA IF NOT EXISTS bronze;
 CREATE SCHEMA IF NOT EXISTS bronze_staging;
 CREATE SCHEMA IF NOT EXISTS silver;
+CREATE SCHEMA IF NOT EXISTS silver_staging;
 CREATE SCHEMA IF NOT EXISTS gold;
 
 -- Create schema metadata tables in bronze for tracking
@@ -13,6 +14,16 @@ CREATE TABLE IF NOT EXISTS bronze.schema_version (
     migration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (schema_name, version)
 );
+
+CREATE TABLE IF NOT EXISTS bronze.platform_schema_version (
+    component VARCHAR(128) PRIMARY KEY,
+    version VARCHAR(64) NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO bronze.platform_schema_version (component, version)
+VALUES ('platform', '1')
+ON CONFLICT (component) DO NOTHING;
 
 -- Create lineage tracking table in bronze
 CREATE TABLE IF NOT EXISTS bronze.load_audit (
@@ -49,7 +60,9 @@ CREATE TABLE IF NOT EXISTS bronze.pipeline_run_audit (
     status VARCHAR(50) NOT NULL,
     started_at TIMESTAMPTZ NOT NULL,
     finished_at TIMESTAMPTZ,
-    error_count INTEGER NOT NULL DEFAULT 0
+    error_count INTEGER NOT NULL DEFAULT 0,
+    error_type VARCHAR(255),
+    error_message TEXT
 );
 
 CREATE TABLE IF NOT EXISTS bronze.table_load_audit (
@@ -66,7 +79,8 @@ CREATE TABLE IF NOT EXISTS bronze.table_load_audit (
     error_type VARCHAR(255),
     error_message TEXT,
     started_at TIMESTAMPTZ,
-    finished_at TIMESTAMPTZ
+    finished_at TIMESTAMPTZ,
+    duration_ms BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS bronze.batch_load_audit (
@@ -81,7 +95,8 @@ CREATE TABLE IF NOT EXISTS bronze.batch_load_audit (
     attempt_count INTEGER NOT NULL DEFAULT 0,
     status VARCHAR(50) NOT NULL,
     committed_at TIMESTAMPTZ,
-    content_hash VARCHAR(128)
+    content_hash VARCHAR(128),
+    duration_ms BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS bronze.ingestion_batch_registry (
@@ -101,6 +116,8 @@ CREATE TABLE IF NOT EXISTS bronze.rejected_records (
     source_hash VARCHAR(128),
     reason TEXT NOT NULL,
     rejected_at TIMESTAMPTZ NOT NULL,
+    transform_version VARCHAR(128) NOT NULL DEFAULT 'unknown',
+    error_type VARCHAR(128) NOT NULL DEFAULT 'TransformationError',
     UNIQUE (run_id, load_id, batch_id, record_key, source_hash)
 );
 

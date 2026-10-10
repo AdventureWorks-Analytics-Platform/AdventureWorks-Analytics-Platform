@@ -10,7 +10,11 @@ from psycopg2 import sql
 from src.core.settings import Settings, get_settings
 from src.shared.connectors.postgres_connector import PostgreSQLConnector
 from src.shared.ingestion.ingestion_models import utc_now
-from src.shared.ingestion.retry_policy import execute_with_retry
+from src.shared.ingestion.retry_policy import (
+    ErrorClass,
+    classify_error,
+    execute_with_retry,
+)
 
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -30,6 +34,7 @@ class PostgresGoldReconciliationService:
 
     def ensure_registry(self) -> None:
         with self.connector_factory(settings=self.settings) as connection:
+            connection.execute_query("CREATE SCHEMA IF NOT EXISTS gold")
             connection.execute_query(
                 f"""
                 CREATE TABLE IF NOT EXISTS gold.{REGISTRY_TABLE} (
@@ -75,8 +80,14 @@ class PostgresGoldReconciliationService:
                     committed_at = EXCLUDED.committed_at
                 """,
                 (
-                    batch_id, candidate_schema, target_table, content_hash,
-                    ordering_key, _stringify(lower_bound), _stringify(upper_bound), utc_now(),
+                    batch_id,
+                    candidate_schema,
+                    target_table,
+                    content_hash,
+                    ordering_key,
+                    _stringify(lower_bound),
+                    _stringify(upper_bound),
+                    utc_now(),
                 ),
             )
 
@@ -90,7 +101,9 @@ class PostgresGoldReconciliationService:
         ordering_key: str = "sales_order_detail_id",
         unique_key_values: Iterable[Any] = (),
     ) -> str:
-        self._validate_identifiers(*(item for item in (candidate_schema, target_table, ordering_key) if item))
+        self._validate_identifiers(
+            *(item for item in (candidate_schema, target_table, ordering_key) if item)
+        )
         self.ensure_registry()
         with self.connector_factory(settings=self.settings) as connection:
             rows = connection.fetch_results(
@@ -107,21 +120,29 @@ class PostgresGoldReconciliationService:
             if candidate_schema:
                 values = tuple(unique_key_values)
                 if values:
-                    self._validate_identifiers(candidate_schema, target_table, ordering_key)
-                    placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in values)
+                    self._validate_identifiers(
+                        candidate_schema, target_table, ordering_key
+                    )
                     query = sql.SQL(
-                        "SELECT 1 FROM {}.{} WHERE {} IN ({}) LIMIT 1"
+                        "SELECT COUNT(DISTINCT {}) FROM {}.{} WHERE {} = ANY(%s)"
                     ).format(
+                        sql.Identifier(ordering_key),
                         sql.Identifier(candidate_schema),
                         sql.Identifier(target_table),
                         sql.Identifier(ordering_key),
-                        placeholders,
                     )
                     cursor = connection.connection.cursor()
                     try:
-                        cursor.execute(query, values)
-                        if cursor.fetchone() is not None:
+                        cursor.execute(query, (list(values),))
+                        persisted_count = int(cursor.fetchone()[0])
+                        expected_count = len(set(values))
+                        if persisted_count == expected_count:
                             return "SKIP"
+                        if persisted_count:
+                            raise PostgresGoldReconciliationError(
+                                f"partial batch evidence for {batch_id}: "
+                                f"{persisted_count}/{expected_count} keys exist"
+                            )
                     finally:
                         cursor.close()
         return "RETRY"
@@ -135,27 +156,68 @@ class PostgresGoldReconciliationService:
         candidate_schema: str,
         target_table: str = "fact_sales",
         ordering_key: str = "sales_order_detail_id",
+        unique_key_values: Iterable[Any] = (),
         lower_bound: Any = None,
         upper_bound: Any = None,
         gold_load_id: str,
         policy,
         sleeper,
-    ) -> tuple[Any, int, str]:
+    ) -> dict[str, Any]:
         """Commit one batch once, record identity, and reconcile before retry."""
+
+        initial_decision = self.resolve(
+            batch_id=batch_id,
+            content_hash=content_hash,
+            candidate_schema=candidate_schema,
+            target_table=target_table,
+            ordering_key=ordering_key,
+            unique_key_values=unique_key_values,
+        )
+        if initial_decision == "SKIP":
+            self.record_committed_batch(
+                batch_id=batch_id,
+                candidate_schema=candidate_schema,
+                target_table=target_table,
+                ordering_key=ordering_key,
+                content_hash=content_hash,
+                lower_bound=lower_bound,
+                upper_bound=upper_bound,
+            )
+            return {
+                "result": {"reconciled": True, "batch_id": batch_id},
+                "attempt_count": 1,
+                "status": "SUCCESS",
+                "batch_id": batch_id,
+                "gold_load_id": gold_load_id,
+                "lower_bound": lower_bound,
+                "upper_bound": upper_bound,
+                "content_hash": content_hash,
+            }
 
         def guarded_operation():
             try:
                 result = operation()
-            except (TimeoutError, ConnectionError) as error:
+            except Exception as error:
+                if classify_error(error) != ErrorClass.TRANSIENT:
+                    raise
                 decision = self.resolve(
                     batch_id=batch_id,
                     content_hash=content_hash,
                     candidate_schema=candidate_schema,
                     target_table=target_table,
                     ordering_key=ordering_key,
-                    unique_key_values=(),
+                    unique_key_values=unique_key_values,
                 )
                 if decision == "SKIP":
+                    self.record_committed_batch(
+                        batch_id=batch_id,
+                        candidate_schema=candidate_schema,
+                        target_table=target_table,
+                        ordering_key=ordering_key,
+                        content_hash=content_hash,
+                        lower_bound=lower_bound,
+                        upper_bound=upper_bound,
+                    )
                     return {"reconciled": True, "batch_id": batch_id}
                 raise error
             self.record_committed_batch(

@@ -14,12 +14,14 @@ pytestmark = pytest.mark.integration
 
 class TestSQLServerConnectivity:
     """Test SQL Server connectivity."""
-    
+
+    pytestmark = pytest.mark.sqlserver_integration
+
     def test_sql_server_connection(self):
         """Test SQL Server connection."""
         with SQLServerConnector() as conn:
             assert conn.connect()
-    
+
     def test_sql_server_query_execution(self):
         """Test SQL Server query execution."""
         with SQLServerConnector() as conn:
@@ -29,12 +31,14 @@ class TestSQLServerConnectivity:
 
 class TestPostgreSQLConnectivity:
     """Test PostgreSQL connectivity."""
-    
+
+    pytestmark = pytest.mark.postgres_integration
+
     def test_postgresql_connection(self):
         """Test PostgreSQL connection."""
         with PostgreSQLConnector() as conn:
             assert conn.connect()
-    
+
     def test_postgresql_schemas_exist(self):
         """Test that required schemas exist."""
         with PostgreSQLConnector() as conn:
@@ -47,6 +51,8 @@ class TestPostgreSQLConnectivity:
 class TestBronzeIngestion:
     """Test raw bronze ingestion for one source table."""
 
+    @pytest.mark.postgres_integration
+    @pytest.mark.sqlserver_integration
     def test_person_person_raw_load(self):
         """Load a source table into bronze and verify lineage metadata."""
         source_table = 'Person.Person'
@@ -62,14 +68,18 @@ class TestBronzeIngestion:
             assert source_count > 0, "No rows returned from Person.Person"
 
         inserted_rows = bronze_ingest_table(source_table)
-        assert inserted_rows == source_count, "Inserted row count did not match source table row count"
+        assert inserted_rows == source_count, (
+            "Inserted row count did not match source table row count"
+        )
 
         with PostgreSQLConnector() as pg_conn:
             target_count = pg_conn.fetch_results(
                 "SELECT COUNT(*) FROM bronze.person_person"
             )[0][0]
             columns = pg_conn.fetch_results(
-                "SELECT lower(column_name) FROM information_schema.columns WHERE table_schema = 'bronze' AND table_name = 'person_person' ORDER BY ordinal_position"
+                "SELECT lower(column_name) FROM information_schema.columns "
+                "WHERE table_schema = 'bronze' AND table_name = 'person_person' "
+                "ORDER BY ordinal_position"
             )
             column_names = {row[0] for row in columns}
             assert target_count == source_count, "bronze.person_person row count mismatch"

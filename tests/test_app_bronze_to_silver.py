@@ -1,4 +1,9 @@
 from src.app.app import App
+from src.core.settings import Settings
+from src.shared.ingestion.postgres_publish_service import (
+    PostgresSilverDedupService,
+    PostgresSilverStagingValidator,
+)
 
 
 class _Health:
@@ -38,6 +43,26 @@ def _app(health, bootstrap, pipeline):
     app.bronze_to_silver_pipeline = pipeline
     app._running = False
     return app
+
+
+def test_app_wires_sql_silver_dedup_by_default():
+    settings = Settings(
+        sql_server_host="sql-host",
+        postgres_username="warehouse-user",
+        postgres_password="warehouse-secret",
+        _env_file=None,
+    )
+
+    app = App(settings=settings)
+
+    assert isinstance(
+        app.bronze_to_silver_pipeline.silver_job.dedup_service,
+        PostgresSilverDedupService,
+    )
+    assert isinstance(
+        app.bronze_to_silver_pipeline.silver_job.sql_validator,
+        PostgresSilverStagingValidator,
+    )
 
 
 def test_app_runs_bronze_to_silver_after_health_and_bootstrap():
@@ -110,4 +135,3 @@ def test_app_partial_success_is_degraded_not_ok():
 
     assert result["status"] == "degraded"
     assert result["failed_stage"] == "silver"
-

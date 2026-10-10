@@ -58,9 +58,11 @@ class TestBuildDimDate:
 
         result = build_dim_date(headers)
 
-        assert result[result["date_id"] == 20110528]["is_weekend"].values[0] == True  # Saturday
-        assert result[result["date_id"] == 20110529]["is_weekend"].values[0] == True  # Sunday
-        assert result[result["date_id"] == 20110530]["is_weekend"].values[0] == False  # Monday
+        assert result[result["date_id"] == 20110528]["is_weekend"].values[0]  # Saturday
+        assert result[result["date_id"] == 20110529]["is_weekend"].values[0]  # Sunday
+        assert not result[result["date_id"] == 20110530]["is_weekend"].values[
+            0
+        ]  # Monday
 
     def test_build_dim_date_rejects_empty_or_invalid_input(self):
         with pytest.raises(DimensionBuildError, match="at least one valid order_date"):
@@ -449,4 +451,3 @@ class TestKPICalculations:
         assert row["net_sales"] == 18.0
         assert row["order_date_id"] == 20110615
         assert pd.isna(row["salesperson_id"])  # Online order
-

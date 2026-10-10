@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 import inspect
 from time import perf_counter
 from typing import Any
 from uuid import uuid4
+
+from src.shared.observability.structured_logging import emit_event
 
 
 class PipelineRunner:
@@ -41,89 +44,182 @@ class PipelineRunner:
         recovery_snapshot: dict[str, object] | None = None,
         source_snapshot_id: str | None = None,
     ) -> dict[str, object]:
+        logger = logging.getLogger(__name__)
         started_at = datetime.now(timezone.utc)
         started_clock = self.clock()
         run_id = str(uuid4())
         requested_stages = ["bronze", "silver"] if stage == "full" else [stage]
         if stage == "full" and self.gold_pipeline is not None:
             requested_stages.append("gold")
+        emit_event(
+            logger,
+            logging.INFO,
+            "pipeline.started",
+            run_id=run_id,
+            pipeline_name="adventureworks",
+            mode=mode,
+            stage="pipeline",
+        )
         if mode not in self.valid_modes or stage not in self.valid_stages:
             return self._result(
-                run_id, mode, requested_stages, started_at, started_clock,
-                    health={"status": "ok"}, bootstrap=None, pipeline=None, gold=None,
-                failed_stage="configuration", status="FAILED",
+                run_id,
+                mode,
+                requested_stages,
+                started_at,
+                started_clock,
+                health={"status": "ok"},
+                bootstrap=None,
+                pipeline=None,
+                gold=None,
+                failed_stage="configuration",
+                status="FAILED",
                 error=f"unsupported mode/stage: mode={mode}, stage={stage}",
             )
         if stage == "silver" and not recovery_snapshot:
             return self._result(
-                run_id, mode, requested_stages, started_at, started_clock,
-                health={"status": "ok"}, bootstrap=None, pipeline=None, gold=None,
-                failed_stage="configuration", status="FAILED",
+                run_id,
+                mode,
+                requested_stages,
+                started_at,
+                started_clock,
+                health={"status": "ok"},
+                bootstrap=None,
+                pipeline=None,
+                gold=None,
+                failed_stage="configuration",
+                status="FAILED",
                 error="standalone silver requires recovery_snapshot",
             )
         if stage == "gold" and not source_snapshot_id:
             return self._result(
-                run_id, mode, requested_stages, started_at, started_clock,
-                health={"status": "ok"}, bootstrap=None, pipeline=None, gold=None,
-                failed_stage="configuration", status="FAILED",
+                run_id,
+                mode,
+                requested_stages,
+                started_at,
+                started_clock,
+                health={"status": "ok"},
+                bootstrap=None,
+                pipeline=None,
+                gold=None,
+                failed_stage="configuration",
+                status="FAILED",
                 error="standalone gold requires source_snapshot_id",
             )
         if stage == "gold" and self.gold_pipeline is None:
             return self._result(
-                run_id, mode, requested_stages, started_at, started_clock,
-                health={"status": "ok"}, bootstrap=None, pipeline=None, gold=None,
-                failed_stage="configuration", status="FAILED",
+                run_id,
+                mode,
+                requested_stages,
+                started_at,
+                started_clock,
+                health={"status": "ok"},
+                bootstrap=None,
+                pipeline=None,
+                gold=None,
+                failed_stage="configuration",
+                status="FAILED",
                 error="gold stage is not configured",
             )
         settings_check = None
         validate_settings = getattr(self.health_service, "validate_settings", None)
         if callable(validate_settings):
+            emit_event(
+                logger, logging.INFO, "stage.started", run_id=run_id, stage="settings"
+            )
             settings_check = validate_settings()
             if settings_check.get("status") != "ok":
                 return self._result(
-                    run_id, mode, requested_stages, started_at, started_clock,
+                    run_id,
+                    mode,
+                    requested_stages,
+                    started_at,
+                    started_clock,
                     health={"status": "not_checked", "phase": "pre_bootstrap"},
-                    bootstrap=None, pipeline=None, gold=None,
-                    failed_stage="settings", status="FAILED",
+                    bootstrap=None,
+                    pipeline=None,
+                    gold=None,
+                    failed_stage="settings",
+                    status="FAILED",
                     error=self._readiness_error(settings_check),
                     settings=settings_check,
                 )
+        emit_event(logger, logging.INFO, "stage.started", run_id=run_id, stage="health")
         health = self.health_service.check_all()
         if health.get("status") != "ok":
             return self._result(
-                run_id, mode, requested_stages, started_at, started_clock,
-                health=health, bootstrap=None, pipeline=None,
+                run_id,
+                mode,
+                requested_stages,
+                started_at,
+                started_clock,
+                health=health,
+                bootstrap=None,
+                pipeline=None,
                 gold=None,
-                failed_stage="health", status="FAILED", settings=settings_check,
+                failed_stage="health",
+                status="FAILED",
+                settings=settings_check,
             )
 
+        emit_event(
+            logger, logging.INFO, "stage.started", run_id=run_id, stage="bootstrap"
+        )
         bootstrap = self.bootstrap_job.run()
         readiness = bootstrap.get("readiness")
-        post_bootstrap_failed = isinstance(readiness, dict) and readiness.get("status") != "ready"
+        post_bootstrap_failed = (
+            isinstance(readiness, dict) and readiness.get("status") != "ready"
+        )
         if bootstrap.get("status") != "ok" or post_bootstrap_failed:
             return self._result(
-                run_id, mode, requested_stages, started_at, started_clock,
-                health=health, bootstrap=bootstrap, pipeline=None,
+                run_id,
+                mode,
+                requested_stages,
+                started_at,
+                started_clock,
+                health=health,
+                bootstrap=bootstrap,
+                pipeline=None,
                 gold=None,
-                failed_stage="bootstrap", status="FAILED", settings=settings_check,
+                failed_stage="bootstrap",
+                status="FAILED",
+                settings=settings_check,
             )
 
         pipeline = None
         if stage in {"full", "bronze", "silver"}:
+            for pipeline_stage in requested_stages:
+                if pipeline_stage in {"bronze", "silver"}:
+                    emit_event(
+                        logger,
+                        logging.INFO,
+                        "stage.started",
+                        run_id=run_id,
+                        stage=pipeline_stage,
+                    )
             pipeline = self._run_stage(
                 mode, stage, recovery_snapshot, self.bronze_to_silver_pipeline
             )
         if pipeline is not None and pipeline.get("status") not in self.success_statuses:
             return self._result(
-                run_id, mode, requested_stages, started_at, started_clock,
-                health=health, bootstrap=bootstrap, pipeline=pipeline,
+                run_id,
+                mode,
+                requested_stages,
+                started_at,
+                started_clock,
+                health=health,
+                bootstrap=bootstrap,
+                pipeline=pipeline,
                 gold=None,
                 failed_stage="silver" if stage == "full" else stage,
-                status="FAILED", settings=settings_check,
+                status="FAILED",
+                settings=settings_check,
             )
 
         gold = None
         if stage in {"full", "gold"} and self.gold_pipeline is not None:
+            emit_event(
+                logger, logging.INFO, "stage.started", run_id=run_id, stage="gold"
+            )
             gold = self._run_gold(
                 self.gold_pipeline,
                 source_snapshot_id or run_id,
@@ -131,17 +227,33 @@ class PipelineRunner:
             )
             if gold.get("status") not in self.success_statuses:
                 return self._result(
-                    run_id, mode, requested_stages, started_at, started_clock,
-                    health=health, bootstrap=bootstrap, pipeline=pipeline,
+                    run_id,
+                    mode,
+                    requested_stages,
+                    started_at,
+                    started_clock,
+                    health=health,
+                    bootstrap=bootstrap,
+                    pipeline=pipeline,
                     gold=gold,
-                    failed_stage="gold", status="FAILED", settings=settings_check,
+                    failed_stage="gold",
+                    status="FAILED",
+                    settings=settings_check,
                 )
 
         return self._result(
-            run_id, mode, requested_stages, started_at, started_clock,
-            health=health, bootstrap=bootstrap, pipeline=pipeline,
+            run_id,
+            mode,
+            requested_stages,
+            started_at,
+            started_clock,
+            health=health,
+            bootstrap=bootstrap,
+            pipeline=pipeline,
             gold=gold,
-            failed_stage=None, status=self._overall_status(pipeline, gold), settings=settings_check,
+            failed_stage=None,
+            status=self._overall_status(pipeline, gold),
+            settings=settings_check,
         )
 
     @staticmethod
@@ -173,7 +285,11 @@ class PipelineRunner:
         for result in (pipeline, gold):
             if isinstance(result, dict):
                 statuses.append(result.get("status"))
-        return "SUCCESS_WITH_REJECTIONS" if "SUCCESS_WITH_REJECTIONS" in statuses else "SUCCESS"
+        return (
+            "SUCCESS_WITH_REJECTIONS"
+            if "SUCCESS_WITH_REJECTIONS" in statuses
+            else "SUCCESS"
+        )
 
     @staticmethod
     def _run_gold(gold_pipeline, pipeline_snapshot_id, pipeline):
@@ -243,12 +359,80 @@ class PipelineRunner:
         result.update(result["counts"])
         if self.reporter is not None and hasattr(self.reporter, "attach"):
             self.reporter.attach(result)
+        logger = logging.getLogger(__name__)
+        for stage_result in result["stages"]:
+            stage_status = stage_result["status"]
+            if stage_status in {None, "NOT_REQUESTED"}:
+                continue
+            succeeded = stage_status in self.success_statuses
+            stage_detail = stage_result["result"]
+            emit_event(
+                logger,
+                logging.INFO if succeeded else logging.ERROR,
+                "stage.completed" if succeeded else "stage.failed",
+                run_id=run_id,
+                stage=stage_result["stage"],
+                status=stage_status,
+                duration_ms=(
+                    stage_detail.get("duration_ms")
+                    if isinstance(stage_detail, dict)
+                    and isinstance(stage_detail.get("duration_ms"), int)
+                    else None
+                ),
+                rows_read=(
+                    stage_detail.get("rows_read")
+                    if isinstance(stage_detail, dict)
+                    and isinstance(stage_detail.get("rows_read"), int)
+                    else None
+                ),
+                rows_written=(
+                    stage_detail.get("rows_written")
+                    if isinstance(stage_detail, dict)
+                    and isinstance(stage_detail.get("rows_written"), int)
+                    else None
+                ),
+                rows_rejected=(
+                    stage_detail.get("rows_rejected")
+                    if isinstance(stage_detail, dict)
+                    and isinstance(stage_detail.get("rows_rejected"), int)
+                    else None
+                ),
+                error_type=(
+                    self._error_type(error, failed_stage)
+                    if stage_result["failed"]
+                    else None
+                ),
+            )
+        emit_event(
+            logger,
+            logging.INFO if status in self.success_statuses else logging.ERROR,
+            (
+                "pipeline.completed"
+                if status in self.success_statuses
+                else "pipeline.failed"
+            ),
+            run_id=run_id,
+            pipeline_name="adventureworks",
+            mode=mode,
+            stage="pipeline",
+            status=status,
+            failed_stage=failed_stage,
+            error_type=self._error_type(error, failed_stage),
+            duration_ms=result["duration_ms"],
+            rows_read=result["rows_read"],
+            rows_written=result["rows_written"],
+            rows_rejected=result["rows_rejected"],
+        )
         return result
 
     @classmethod
     def _stage_results(cls, settings, health, bootstrap, pipeline, gold, failed_stage):
         results = []
-        for stage, value in (("settings", settings), ("health", health), ("bootstrap", bootstrap)):
+        for stage, value in (
+            ("settings", settings),
+            ("health", health),
+            ("bootstrap", bootstrap),
+        ):
             if value is None:
                 continue
             status = value.get("status") if isinstance(value, dict) else None
@@ -269,15 +453,19 @@ class PipelineRunner:
             results.append(
                 cls._stage_entry(
                     "silver",
-                    cls._nested_status(pipeline.get("silver"))
-                    if pipeline.get("silver") is not None
-                    else pipeline.get("status"),
+                    (
+                        cls._nested_status(pipeline.get("silver"))
+                        if pipeline.get("silver") is not None
+                        else pipeline.get("status")
+                    ),
                     pipeline.get("silver"),
                     failed_stage,
                 )
             )
         if gold is not None:
-            results.append(cls._stage_entry("gold", gold.get("status"), gold, failed_stage))
+            results.append(
+                cls._stage_entry("gold", gold.get("status"), gold, failed_stage)
+            )
         return results
 
     @staticmethod

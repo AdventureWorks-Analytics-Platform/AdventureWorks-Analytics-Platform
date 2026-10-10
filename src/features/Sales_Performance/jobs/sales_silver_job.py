@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -20,6 +21,14 @@ from src.shared.ingestion.quarantine_service import QuarantineService
 from src.shared.ingestion.reconciliation_service import ReconciliationService
 from src.shared.ingestion.retry_policy import RetryPolicy, execute_with_retry
 from src.shared.ingestion.staging_manager import StagingManager
+from src.shared.observability.structured_logging import emit_event
+
+
+logger = logging.getLogger(__name__)
+
+
+def _count_for_log(value: object) -> int:
+    return int(value) if isinstance(value, (int, float)) else 0
 
 
 class SilverValidationError(ValueError):
@@ -30,30 +39,67 @@ class SilverRejectionThresholdError(ValueError):
     """Raised when persisted row rejections exceed the configured policy."""
 
 
-SILVER_INPUT_REQUIRED_COLUMNS = {
+def _format_validation_issues(report: dict[str, object]) -> str:
+    issues = report.get("issues", [])
+    if not isinstance(issues, (list, tuple)):
+        raise TypeError("validation report issues must be a list or tuple")
+    return "; ".join(str(issue) for issue in issues)
+
+
+SILVER_INPUT_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "sales_order_header": (
-        "SalesOrderID", "OrderDate", "DueDate", "ShipDate", "CustomerID",
-        "SalesPersonID", "TerritoryID", "SubTotal", "TaxAmt", "Freight",
-        "TotalDue", "OnlineOrderFlag", "Status",
+        "SalesOrderID",
+        "OrderDate",
+        "DueDate",
+        "ShipDate",
+        "CustomerID",
+        "SalesPersonID",
+        "TerritoryID",
+        "SubTotal",
+        "TaxAmt",
+        "Freight",
+        "TotalDue",
+        "OnlineOrderFlag",
+        "Status",
     ),
     "sales_order_detail": (
-        "SalesOrderID", "SalesOrderDetailID", "ProductID", "OrderQty",
-        "UnitPrice", "UnitPriceDiscount", "LineTotal",
+        "SalesOrderID",
+        "SalesOrderDetailID",
+        "ProductID",
+        "OrderQty",
+        "UnitPrice",
+        "UnitPriceDiscount",
+        "LineTotal",
     ),
     "customer": (
-        "CustomerID", "PersonID", "StoreID", "TerritoryID", "AccountNumber",
+        "CustomerID",
+        "PersonID",
+        "StoreID",
+        "TerritoryID",
+        "AccountNumber",
     ),
     "sales_territory": ("TerritoryID", "Name", "CountryRegionCode", "Group"),
     "sales_person": (
-        "BusinessEntityID", "TerritoryID", "SalesQuota", "Bonus", "CommissionPct",
+        "BusinessEntityID",
+        "TerritoryID",
+        "SalesQuota",
+        "Bonus",
+        "CommissionPct",
     ),
     "product": (
-        "ProductID", "Name", "ProductNumber", "ProductLine", "Class", "Style",
-        "ListPrice", "StandardCost", "DiscontinuedDate",
+        "ProductID",
+        "Name",
+        "ProductNumber",
+        "ProductLine",
+        "Class",
+        "Style",
+        "ListPrice",
+        "StandardCost",
+        "DiscontinuedDate",
     ),
 }
 
-SILVER_CONVERSION_RULES = {
+SILVER_CONVERSION_RULES: dict[str, dict[str, tuple[str, ...]]] = {
     "sales_order_header": {
         "date": ("OrderDate", "DueDate", "ShipDate"),
         "numeric": ("SubTotal", "TaxAmt", "Freight", "TotalDue"),
@@ -210,7 +256,9 @@ class SilverTransformationJob:
         table_specs: Iterable[TableSpec] | None = None,
         settings: Settings | None = None,
         reader: Callable[[str, object], pd.DataFrame] | None = None,
-        transformer: Callable[[str, pd.DataFrame, pd.DataFrame | None], pd.DataFrame] | None = None,
+        transformer: (
+            Callable[[str, pd.DataFrame, pd.DataFrame | None], pd.DataFrame] | None
+        ) = None,
         writer: Callable[[pd.DataFrame, str], None] | None = None,
         quarantine_service: QuarantineService | None = None,
         rejected_threshold: int | None = None,
@@ -239,9 +287,12 @@ class SilverTransformationJob:
         )
         if self.rejected_threshold < 0:
             raise ValueError("rejected_threshold cannot be negative")
-        self.transform_version = transform_version or getattr(
+        configured_transform_version = getattr(
             self.settings, "silver_transform_version", "silver-v1"
         )
+        if not isinstance(configured_transform_version, str):
+            raise TypeError("silver_transform_version must be a string")
+        self.transform_version = transform_version or configured_transform_version
         self.staging_manager = staging_manager or StagingManager()
         self.reconciliation = ReconciliationService(self.staging_manager)
         self.checkpoint_manager = checkpoint_manager or CheckpointManager()
@@ -300,20 +351,25 @@ class SilverTransformationJob:
         output = frame.copy()
         output["run_id"] = run_id or "run-unknown"
         output["load_id"] = load_id or "load-unknown"
-        output["batch_id"] = batch_id or hashlib.sha256(
-            json.dumps(
-                {
-                    "source_table": source_table,
-                    "row_count": len(output),
-                    "first_row": output.iloc[0].dropna().to_dict(),
-                },
-                default=str,
-                sort_keys=True,
-            ).encode("utf-8")
-        ).hexdigest()
+        output["batch_id"] = (
+            batch_id
+            or hashlib.sha256(
+                json.dumps(
+                    {
+                        "source_table": source_table,
+                        "row_count": len(output),
+                        "first_row": output.iloc[0].dropna().to_dict(),
+                    },
+                    default=str,
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+        )
 
         def _record_hash(row: pd.Series) -> str:
-            payload = row.drop(labels=["run_id", "load_id", "batch_id"], errors="ignore").to_dict()
+            payload = row.drop(
+                labels=["run_id", "load_id", "batch_id"], errors="ignore"
+            ).to_dict()
             normalized = json.dumps(payload, default=str, sort_keys=True)
             return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
@@ -336,10 +392,12 @@ class SilverTransformationJob:
                 self.retry_policy,
                 self.sleeper,
             )
-            yield self._with_batch_lineage(frame, source_table, run_id=run_id, load_id=load_id)
+            yield self._with_batch_lineage(
+                frame, source_table, run_id=run_id, load_id=load_id
+            )
             return
 
-        batch_size = int(chunksize or getattr(self.settings, "batch_size", 10000))
+        batch_size = int(chunksize or self.settings.batch_size)
         ordering_key = self._ordering_key_for(source_table)
         resolved_source = source_name or f'bronze."{source_table}"'
         query = f'SELECT * FROM {resolved_source} ORDER BY "{ordering_key}"'
@@ -403,7 +461,7 @@ class SilverTransformationJob:
 
     def _partition_conversion_errors(
         self, frame: pd.DataFrame, spec: TableSpec
-    ) -> tuple[pd.DataFrame, tuple[dict[str, object], ...]]:
+    ) -> tuple[pd.DataFrame, tuple[dict[str, str | None], ...]]:
         rules = SILVER_CONVERSION_RULES.get(spec.source_table, {})
         rejected_mask = pd.Series(False, index=frame.index)
         reasons: dict[object, list[str]] = {}
@@ -432,23 +490,32 @@ class SilverTransformationJob:
             rejected_mask |= invalid
 
         for column in rules.get("string", ()):
-            invalid = frame[column].notna() & frame[column].astype("string").str.strip().eq("")
+            invalid = frame[column].notna() & frame[column].astype(
+                "string"
+            ).str.strip().eq("")
             for index in frame.index[invalid]:
                 reasons.setdefault(index, []).append(f"blank required string: {column}")
             rejected_mask |= invalid
 
         rejected = tuple(
             {
-                "run_id": self._optional_string(frame.loc[index].get("run_id")) or "run-unknown",
-                "load_id": self._optional_string(frame.loc[index].get("load_id")) or "load-unknown",
-                "batch_id": self._optional_string(frame.loc[index].get("batch_id")) or "batch-unknown",
+                "run_id": self._optional_string(frame.loc[index].get("run_id"))
+                or "run-unknown",
+                "load_id": self._optional_string(frame.loc[index].get("load_id"))
+                or "load-unknown",
+                "batch_id": self._optional_string(frame.loc[index].get("batch_id"))
+                or "batch-unknown",
                 "record_key": str(
                     frame.loc[index].get(
-                        SILVER_INPUT_KEY_COLUMNS.get(spec.source_table, spec.primary_key),
+                        SILVER_INPUT_KEY_COLUMNS.get(
+                            spec.source_table, spec.primary_key
+                        ),
                         index,
                     )
                 ),
-                "source_hash": self._optional_string(frame.loc[index].get("_record_hash")),
+                "source_hash": self._optional_string(
+                    frame.loc[index].get("_record_hash")
+                ),
                 "reason": "; ".join(reason_list),
             }
             for index, reason_list in reasons.items()
@@ -464,11 +531,18 @@ class SilverTransformationJob:
             column for column in spec.required_columns if column not in frame.columns
         ]
         allowed_metadata = {
-            "_source_system", "_source_table", "_load_date", "_record_hash",
-            "run_id", "load_id", "batch_id", "source_snapshot_id",
+            "_source_system",
+            "_source_table",
+            "_load_date",
+            "_record_hash",
+            "run_id",
+            "load_id",
+            "batch_id",
+            "source_snapshot_id",
         }
         unexpected_columns = [
-            column for column in frame.columns
+            column
+            for column in frame.columns
             if column not in set(spec.required_columns) | allowed_metadata
         ]
         if missing_columns or unexpected_columns:
@@ -481,8 +555,10 @@ class SilverTransformationJob:
                 f"NULL Silver primary key for {spec.target_name}: {spec.primary_key}"
             )
         invalid_types = [
-            column for column in SILVER_OUTPUT_NUMERIC_COLUMNS.get(spec.source_table, ())
-            if column in frame.columns and not pd.api.types.is_numeric_dtype(frame[column])
+            column
+            for column in SILVER_OUTPUT_NUMERIC_COLUMNS.get(spec.source_table, ())
+            if column in frame.columns
+            and not pd.api.types.is_numeric_dtype(frame[column])
         ]
         if invalid_types:
             raise SilverValidationError(
@@ -502,11 +578,18 @@ class SilverTransformationJob:
             column for column in spec.required_columns if column not in frame.columns
         ]
         allowed_metadata = {
-            "_source_system", "_source_table", "_load_date", "_record_hash",
-            "run_id", "load_id", "batch_id", "source_snapshot_id",
+            "_source_system",
+            "_source_table",
+            "_load_date",
+            "_record_hash",
+            "run_id",
+            "load_id",
+            "batch_id",
+            "source_snapshot_id",
         }
         unexpected_columns = [
-            column for column in frame.columns
+            column
+            for column in frame.columns
             if column not in set(spec.required_columns) | allowed_metadata
         ]
         if missing_columns:
@@ -531,9 +614,18 @@ class SilverTransformationJob:
 
         join_ok = True
         if spec.source_table == "sales_person" and "salesperson_name" in frame.columns:
-            join_ok = frame["salesperson_name"].fillna("").astype("string").str.strip().ne("").all()
+            join_ok = (
+                frame["salesperson_name"]
+                .fillna("")
+                .astype("string")
+                .str.strip()
+                .ne("")
+                .all()
+            )
             if not join_ok:
-                issues.append("sales_person Person join produced blank salesperson_name")
+                issues.append(
+                    "sales_person Person join produced blank salesperson_name"
+                )
 
         threshold_ok = rejected_count <= self.rejected_threshold
         if not threshold_ok:
@@ -558,9 +650,9 @@ class SilverTransformationJob:
     def _record_rejections(
         self,
         spec: TableSpec,
-        rejections: tuple[dict[str, object], ...],
+        rejections: tuple[dict[str, str | None], ...],
     ) -> list[RejectedRecord]:
-        records = []
+        records: list[RejectedRecord] = []
         for rejection in rejections:
             record = RejectedRecord(
                 run_id=str(rejection["run_id"]),
@@ -592,28 +684,14 @@ class SilverTransformationJob:
         ]
 
     def _default_writer(self, silver_frame: pd.DataFrame, target_name: str) -> None:
-        if self.publish_service is None:
-            raise RuntimeError(
-                "Refusing unsafe to_sql(if_exists='replace') write: no publish_service "
-                "or custom writer was injected. Inject a publish_service (e.g. "
-                "PostgresSilverPublishService) for atomic staging publish."
-            )
-        from scripts.transformation.silver.sales_silver_clean import _warehouse_engine
-        from src.shared.connectors.postgres_connector import PostgreSQLConnector
+        raise RuntimeError(
+            "Refusing Silver publication without a publish_service or custom writer. "
+            "Inject PostgresSilverPublishService for atomic staging publish."
+        )
 
-        with PostgreSQLConnector() as pg_conn:
-            engine = _warehouse_engine(pg_conn.connection)
-            silver_frame.to_sql(
-                target_name,
-                engine,
-                schema="silver",
-                if_exists="replace",
-                index=False,
-                method="multi",
-                chunksize=1000,
-            )
-
-    def _default_staging_writer(self, silver_frame: pd.DataFrame, staging_name: str) -> None:
+    def _default_staging_writer(
+        self, silver_frame: pd.DataFrame, staging_name: str
+    ) -> None:
         self._staging_frames.setdefault(staging_name, []).append(silver_frame.copy())
 
     def _default_staging_reader(self, staging_name: str) -> pd.DataFrame:
@@ -622,7 +700,9 @@ class SilverTransformationJob:
             return pd.DataFrame()
         return pd.concat(frames, ignore_index=True)
 
-    def _rewrite_staged_content(self, silver_frame: pd.DataFrame, staging_name: str) -> None:
+    def _rewrite_staged_content(
+        self, silver_frame: pd.DataFrame, staging_name: str
+    ) -> None:
         """Overwrite per-batch staged rows with the globally deduplicated frame.
 
         Without this, `publish_service.publish()` renames the raw staging table
@@ -690,6 +770,12 @@ class SilverTransformationJob:
         silver_frame: pd.DataFrame,
         source_table: str,
         batch_number: int,
+        *,
+        run_id: str,
+        load_id: str,
+        target_table: str,
+        rows_rejected: int,
+        started_clock: float,
     ) -> tuple[int, int]:
         content_hash = self._content_hash(silver_frame)
         batch_id = self._batch_id_for(
@@ -718,8 +804,61 @@ class SilverTransformationJob:
             self.checkpoint_manager.advance(batch_id, upper_bound)
             return len(silver_frame)
 
-        written, attempt_count, _ = execute_with_retry(
-            commit, self.retry_policy, self.sleeper
+        def on_retry(attempt: int, delay: float, error: BaseException) -> None:
+            emit_event(
+                logger,
+                logging.WARNING,
+                "batch.retrying",
+                run_id=run_id,
+                load_id=load_id,
+                batch_id=batch_id,
+                stage="silver",
+                source_table=source_table,
+                target_table=target_table,
+                attempt=attempt,
+                retry_delay_ms=max(0, int(delay * 1000)),
+                error_type=type(error).__name__,
+            )
+
+        try:
+            written, attempt_count, _ = execute_with_retry(
+                commit, self.retry_policy, self.sleeper, on_retry=on_retry
+            )
+        except Exception as exc:
+            emit_event(
+                logger,
+                logging.ERROR,
+                "batch.failed",
+                run_id=run_id,
+                load_id=load_id,
+                batch_id=batch_id,
+                stage="silver",
+                source_table=source_table,
+                target_table=target_table,
+                status="FAILED",
+                duration_ms=max(0, int((time.perf_counter() - started_clock) * 1000)),
+                rows_read=len(bronze_frame),
+                rows_written=0,
+                rows_rejected=rows_rejected,
+                error_type=type(exc).__name__,
+            )
+            raise
+        emit_event(
+            logger,
+            logging.INFO,
+            "batch.completed",
+            run_id=run_id,
+            load_id=load_id,
+            batch_id=batch_id,
+            stage="silver",
+            source_table=source_table,
+            target_table=target_table,
+            attempt=attempt_count,
+            status="SUCCESS",
+            duration_ms=max(0, int((time.perf_counter() - started_clock) * 1000)),
+            rows_read=len(bronze_frame),
+            rows_written=written,
+            rows_rejected=rows_rejected,
         )
         return written, attempt_count
 
@@ -733,7 +872,9 @@ class SilverTransformationJob:
         if "_record_hash" not in working.columns:
             working["_record_hash"] = working.apply(
                 lambda row: hashlib.sha256(
-                    json.dumps(row.to_dict(), default=str, sort_keys=True).encode("utf-8")
+                    json.dumps(row.to_dict(), default=str, sort_keys=True).encode(
+                        "utf-8"
+                    )
                 ).hexdigest(),
                 axis=1,
             )
@@ -753,15 +894,17 @@ class SilverTransformationJob:
                 ["_record_hash"], ascending=[False], kind="mergesort"
             )
         before = len(working)
-        result = (
-            working.drop_duplicates(subset=[spec.primary_key], keep="first")
-            .reset_index(drop=True)
-        )
+        result = working.drop_duplicates(
+            subset=[spec.primary_key], keep="first"
+        ).reset_index(drop=True)
         return result, before - len(result)
 
     @staticmethod
     def _validate_detail_grain(frame: pd.DataFrame, spec: TableSpec) -> None:
-        if spec.source_table != "sales_order_detail" or spec.primary_key not in frame.columns:
+        if (
+            spec.source_table != "sales_order_detail"
+            or spec.primary_key not in frame.columns
+        ):
             return
         duplicate_count = int(frame[spec.primary_key].duplicated().sum())
         if duplicate_count:
@@ -804,8 +947,8 @@ class SilverTransformationJob:
             "rows_rejected": rows_rejected,
             "rejected_threshold": self.rejected_threshold,
             "attempt_count": attempt_count,
-            "started_at": started_at,
-            "finished_at": finished_at,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
             "error_type": error_type,
             "error_message": error_message,
         }
@@ -849,25 +992,48 @@ class SilverTransformationJob:
 
     def run(
         self, run_id: str | None = None, load_id: str | None = None
-    ) -> dict[str, dict[str, int]]:
+    ) -> dict[str, dict[str, object]]:
         self._validate_execution_order()
         self._validate_required_dependencies()
 
-        results: dict[str, dict[str, int]] = {}
+        results: dict[str, dict[str, object]] = {}
         dependency_frames = self._load_required_dependency_frames()
         person_frame = dependency_frames.get("bronze.person")
         identity = ExecutionIdentity.create()
         resolved_run_id = run_id or identity.run_id
         resolved_load_id = load_id or identity.load_id
+        run_started_clock = time.perf_counter()
+        emit_event(
+            logger,
+            logging.INFO,
+            "pipeline.started",
+            run_id=resolved_run_id,
+            load_id=resolved_load_id,
+            stage="silver",
+        )
         candidate_schema = None
-        snapshot_started = hasattr(self.publish_service, "begin_snapshot")
-        if snapshot_started:
+        snapshot_started = self.publish_service is not None and hasattr(
+            self.publish_service, "begin_snapshot"
+        )
+        if snapshot_started and self.publish_service is not None:
             candidate_schema = self.publish_service.begin_snapshot(resolved_run_id)
 
         for spec in self.table_specs:
             table_started_at = utc_now()
+            table_started_clock = time.perf_counter()
             table_batch_id = self._table_batch_id(
                 resolved_run_id, resolved_load_id, spec
+            )
+            emit_event(
+                logger,
+                logging.INFO,
+                "table.started",
+                run_id=resolved_run_id,
+                load_id=resolved_load_id,
+                batch_id=table_batch_id,
+                stage="silver",
+                source_table=spec.source_name,
+                target_table=spec.target_name,
             )
             staging = self.staging_manager.create(
                 spec.target_table, resolved_run_id, resolved_load_id
@@ -885,6 +1051,9 @@ class SilverTransformationJob:
                 error_type: str | None = None,
                 error_message: str | None = None,
             ) -> None:
+                duration_ms = max(
+                    0, int((time.perf_counter() - table_started_clock) * 1000)
+                )
                 result.update(
                     self._standard_table_result(
                         spec,
@@ -902,22 +1071,49 @@ class SilverTransformationJob:
                         error_message,
                     )
                 )
+                succeeded = status in self.allowed_silver_statuses
+                emit_event(
+                    logger,
+                    logging.INFO if succeeded else logging.ERROR,
+                    "table.completed" if succeeded else "table.failed",
+                    run_id=resolved_run_id,
+                    load_id=resolved_load_id,
+                    batch_id=table_batch_id,
+                    stage="silver",
+                    source_table=spec.source_name,
+                    target_table=spec.target_name,
+                    status=status,
+                    duration_ms=duration_ms,
+                    rows_read=source_count,
+                    rows_written=rows_written,
+                    rows_rejected=len(rejected_records),
+                    rows_deduplicated=_count_for_log(
+                        result.get("rows_deduplicated", 0)
+                    ),
+                    attempt=attempt_count,
+                    error_type=error_type,
+                )
 
             try:
                 for bronze_chunk in self.read_chunks(
                     spec.source_table,
                     spec.source_name,
                     chunksize=getattr(self.settings, "batch_size", 10000),
+                    run_id=resolved_run_id,
+                    load_id=resolved_load_id,
                 ):
                     source_count += len(bronze_chunk)
                     if bronze_chunk.empty:
                         continue
                     batch_number += 1
+                    batch_started_clock = time.perf_counter()
                     self._validate_input_schema(bronze_chunk, spec)
                     valid_chunk, chunk_rejections = self._partition_conversion_errors(
                         bronze_chunk, spec
                     )
-                    rejected_records.extend(self._record_rejections(spec, chunk_rejections))
+                    rejected_records.extend(
+                        self._record_rejections(spec, chunk_rejections)
+                    )
                     if len(rejected_records) > self.rejected_threshold:
                         raise SilverRejectionThresholdError(
                             f"Rejected row threshold exceeded for {spec.source_name}: "
@@ -931,6 +1127,11 @@ class SilverTransformationJob:
                             pd.DataFrame(),
                             spec.source_table,
                             batch_number,
+                            run_id=resolved_run_id,
+                            load_id=resolved_load_id,
+                            target_table=spec.target_name,
+                            rows_rejected=len(chunk_rejections),
+                            started_clock=batch_started_clock,
                         )
                         attempt_count = max(attempt_count, attempts)
                         continue
@@ -948,6 +1149,11 @@ class SilverTransformationJob:
                         staged_silver_chunk,
                         spec.source_table,
                         batch_number,
+                        run_id=resolved_run_id,
+                        load_id=resolved_load_id,
+                        target_table=spec.target_name,
+                        rows_rejected=len(chunk_rejections),
+                        started_clock=batch_started_clock,
                     )
                     attempt_count = max(attempt_count, attempts)
             except (SilverValidationError, SilverRejectionThresholdError) as exc:
@@ -1003,6 +1209,7 @@ class SilverTransformationJob:
                 )
 
             if self.dedup_service is not None:
+                duplicate_detail_exc: SilverValidationError | None = None
                 try:
                     duplicate_detail_count = self.dedup_service.count_duplicate_keys(
                         staging.name, spec.primary_key
@@ -1012,8 +1219,10 @@ class SilverTransformationJob:
                         f"Duplicate-key check failed for {spec.target_name}: {exc}"
                     )
                 else:
-                    duplicate_detail_exc = None
-                    if spec.source_table == "sales_order_detail" and duplicate_detail_count:
+                    if (
+                        spec.source_table == "sales_order_detail"
+                        and duplicate_detail_count
+                    ):
                         duplicate_detail_exc = SilverValidationError(
                             f"Duplicate detail grain for {spec.target_name}: "
                             f"{spec.primary_key} duplicates={duplicate_detail_count}"
@@ -1029,7 +1238,9 @@ class SilverTransformationJob:
                         "rows_rejected": len(rejected_records),
                         "rows_deduplicated": 0,
                         "rows_published": 0,
-                        "rejection_reasons": self._rejection_summaries(rejected_records),
+                        "rejection_reasons": self._rejection_summaries(
+                            rejected_records
+                        ),
                         "attempt_count": attempt_count,
                         "staging_name": staging.name,
                         "published": False,
@@ -1057,7 +1268,10 @@ class SilverTransformationJob:
                         )
                     # Full SQL path: staging is never read back into pandas at all.
                     validation_report = self.sql_validator.validate(
-                        staging.name, spec, source_count, len(rejected_records),
+                        staging.name,
+                        spec,
+                        source_count,
+                        len(rejected_records),
                         self.rejected_threshold,
                     )
                     set_snapshot_id = getattr(
@@ -1089,7 +1303,9 @@ class SilverTransformationJob:
                         "rows_rejected": len(rejected_records),
                         "rows_deduplicated": 0,
                         "rows_published": 0,
-                        "rejection_reasons": self._rejection_summaries(rejected_records),
+                        "rejection_reasons": self._rejection_summaries(
+                            rejected_records
+                        ),
                         "attempt_count": attempt_count,
                         "staging_name": staging.name,
                         "published": False,
@@ -1125,7 +1341,9 @@ class SilverTransformationJob:
                         "rows_rejected": len(rejected_records),
                         "rows_deduplicated": 0,
                         "rows_published": 0,
-                        "rejection_reasons": self._rejection_summaries(rejected_records),
+                        "rejection_reasons": self._rejection_summaries(
+                            rejected_records
+                        ),
                         "attempt_count": attempt_count,
                         "staging_name": staging.name,
                         "error_type": type(exc).__name__,
@@ -1150,7 +1368,9 @@ class SilverTransformationJob:
                 results[spec.target_table] = {
                     "status": "FAILED",
                     "source_count": source_count,
-                    "target_count": self._resolve_row_count(silver_frame, validation_report),
+                    "target_count": self._resolve_row_count(
+                        silver_frame, validation_report
+                    ),
                     "rows_read": source_count,
                     "rows_valid": source_count - len(rejected_records),
                     "rows_rejected": len(rejected_records),
@@ -1162,25 +1382,28 @@ class SilverTransformationJob:
                     "validation_report": validation_report,
                     "published": False,
                     "error_type": "ValidationError",
-                    "error_message": "; ".join(validation_report.get("issues", [])),
+                    "error_message": _format_validation_issues(validation_report),
                 }
                 apply_standard_result(
                     results[spec.target_table],
                     "FAILED",
                     0,
                     "ValidationError",
-                    "; ".join(validation_report.get("issues", [])),
+                    _format_validation_issues(validation_report),
                 )
                 continue
 
             try:
-                self.staging_manager.mark_validated(
-                    staging.name, validation_report
-                )
+                self.staging_manager.mark_validated(staging.name, validation_report)
                 if self.publish_service is not None:
-                    if candidate_schema is not None:
+                    if (
+                        candidate_schema is not None
+                        and self.publish_service is not None
+                    ):
                         published_target = self.publish_service.publish(
-                            spec.target_table, staging.name, validation_report,
+                            spec.target_table,
+                            staging.name,
+                            validation_report,
                             candidate_schema=candidate_schema,
                         )
                     else:
@@ -1196,7 +1419,9 @@ class SilverTransformationJob:
                 results[spec.target_table] = {
                     "status": "FAILED",
                     "source_count": source_count,
-                    "target_count": self._resolve_row_count(silver_frame, validation_report),
+                    "target_count": self._resolve_row_count(
+                        silver_frame, validation_report
+                    ),
                     "rows_read": source_count,
                     "rows_valid": source_count - len(rejected_records),
                     "rows_rejected": len(rejected_records),
@@ -1243,13 +1468,62 @@ class SilverTransformationJob:
                 rows_written,
             )
         if candidate_schema is not None:
+            if self.publish_service is None:
+                raise RuntimeError(
+                    "Silver snapshot candidate exists without a publish service"
+                )
             successful = len(results) == len(self.table_specs) and all(
-                item.get("status") in self.allowed_silver_statuses for item in results.values()
+                item.get("status") in self.allowed_silver_statuses
+                for item in results.values()
             )
             if successful:
-                self.publish_service.finalize_snapshot(candidate_schema, resolved_run_id)
+                self.publish_service.finalize_snapshot(
+                    candidate_schema, resolved_run_id
+                )
             else:
                 self.publish_service.cleanup_snapshot(candidate_schema)
+        statuses = [result.get("status") for result in results.values()]
+        run_status = (
+            "FAILED"
+            if any(status not in self.allowed_silver_statuses for status in statuses)
+            else (
+                "SUCCESS_WITH_REJECTIONS"
+                if "SUCCESS_WITH_REJECTIONS" in statuses
+                else "SUCCESS"
+            )
+        )
+        emit_event(
+            logger,
+            (
+                logging.INFO
+                if run_status in self.allowed_silver_statuses
+                else logging.ERROR
+            ),
+            (
+                "pipeline.completed"
+                if run_status in self.allowed_silver_statuses
+                else "pipeline.failed"
+            ),
+            run_id=resolved_run_id,
+            load_id=resolved_load_id,
+            stage="silver",
+            status=run_status,
+            duration_ms=max(0, int((time.perf_counter() - run_started_clock) * 1000)),
+            rows_read=sum(
+                _count_for_log(item.get("rows_read", 0)) for item in results.values()
+            ),
+            rows_written=sum(
+                _count_for_log(item.get("rows_written", 0)) for item in results.values()
+            ),
+            rows_rejected=sum(
+                _count_for_log(item.get("rows_rejected", 0))
+                for item in results.values()
+            ),
+            rows_deduplicated=sum(
+                _count_for_log(item.get("rows_deduplicated", 0))
+                for item in results.values()
+            ),
+        )
         return results
 
 

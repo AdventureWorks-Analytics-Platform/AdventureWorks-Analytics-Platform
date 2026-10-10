@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
@@ -124,15 +124,13 @@ class IngestionResult:
     rows_written: int = 0
     rows_rejected: int = 0
     attempt_count: int = 1
-    started_at: datetime = None
+    started_at: datetime = field(default_factory=utc_now)
     finished_at: Optional[datetime] = None
     error_type: Optional[str] = None
     error_message: Optional[str] = None
     duration_ms: Optional[int] = None
 
     def __post_init__(self):
-        if self.started_at is None:
-            self.started_at = utc_now()
         if self.rows_read < 0 or self.rows_written < 0 or self.rows_rejected < 0:
             raise ValueError("row counts cannot be negative")
         if self.attempt_count < 1:
@@ -187,7 +185,7 @@ class TableLoadAudit:
     attempt_count: int = 0
     error_type: Optional[str] = None
     error_message: Optional[str] = None
-    started_at: datetime = None
+    started_at: datetime = field(default_factory=utc_now)
     finished_at: Optional[datetime] = None
     duration_ms: Optional[int] = None
 

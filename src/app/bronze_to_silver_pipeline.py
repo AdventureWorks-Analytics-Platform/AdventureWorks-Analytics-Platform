@@ -56,14 +56,22 @@ class BronzeToSilverPipeline:
     ) -> dict[str, object]:
         snapshot_id = str(uuid4())
         recovery = recovery_snapshot is not None
-        if recovery:
+        if recovery_snapshot is not None:
             snapshot_id = str(recovery_snapshot.get("snapshot_id", ""))
-            bronze_result = recovery_snapshot.get("bronze", {})
-            if not snapshot_id or not isinstance(bronze_result, dict):
+            recovery_bronze = recovery_snapshot.get("bronze", {})
+            if not snapshot_id or not isinstance(recovery_bronze, dict):
                 return self._failed_result(
                     snapshot_id,
                     "Invalid recovery snapshot: snapshot_id and bronze results are required",
                 )
+            bronze_result: dict[str, dict[str, object]] = {}
+            for target, result in recovery_bronze.items():
+                if not isinstance(target, str) or not isinstance(result, dict):
+                    return self._failed_result(
+                        snapshot_id,
+                        "Invalid recovery snapshot: bronze results must be mappings",
+                    )
+                bronze_result[target] = result
         else:
             bronze_result = self._run_bronze_jobs(mode, load_date, resume_load_ids)
 
@@ -91,7 +99,10 @@ class BronzeToSilverPipeline:
 
         silver_result = self._run_silver(snapshot_id)
         silver_identity = self._validate_silver_identity(silver_result, snapshot_id)
-        silver_ok = self._silver_succeeded(silver_result) and silver_identity["status"] == "SUCCESS"
+        silver_ok = (
+            self._silver_succeeded(silver_result)
+            and silver_identity["status"] == "SUCCESS"
+        )
         return {
             "status": self._silver_status(silver_result) if silver_ok else "FAILED",
             "snapshot_id": snapshot_id,
@@ -109,9 +120,15 @@ class BronzeToSilverPipeline:
             for result in bronze_result.values()
             if isinstance(result, dict)
         ]
-        if any(status not in {"SUCCESS", "SUCCESS_WITH_REJECTIONS"} for status in statuses):
+        if any(
+            status not in {"SUCCESS", "SUCCESS_WITH_REJECTIONS"} for status in statuses
+        ):
             return "FAILED"
-        return "SUCCESS_WITH_REJECTIONS" if "SUCCESS_WITH_REJECTIONS" in statuses else "SUCCESS"
+        return (
+            "SUCCESS_WITH_REJECTIONS"
+            if "SUCCESS_WITH_REJECTIONS" in statuses
+            else "SUCCESS"
+        )
 
     @staticmethod
     def _silver_status(silver_result):
@@ -172,7 +189,11 @@ class BronzeToSilverPipeline:
         failures = []
         if not isinstance(silver_result, dict):
             failures.append("Silver result is not a mapping")
-            return {"status": "FAILED", "snapshot_id": snapshot_id, "failures": failures}
+            return {
+                "status": "FAILED",
+                "snapshot_id": snapshot_id,
+                "failures": failures,
+            }
         results = (
             [silver_result]
             if "status" in silver_result

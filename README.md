@@ -81,14 +81,17 @@ Each table is read in batches using a stable ordering key. Data passes through p
 
 ### Phase 4C — Silver: Raw Data → Analytical Source
 
-Once all 7 Bronze targets share the same `snapshot_id` and pass `BronzeSnapshotGate`, Silver runs in a fixed dependency order:
+Before Silver runs, `BronzeSnapshotGate` checks that all 7 required Bronze results exist, completed with an accepted status, were published, include run/load identities, and belong to the pipeline's expected `snapshot_id`. This prevents Silver from starting with a missing or failed Bronze target, or with a result explicitly tagged to a different pipeline snapshot.
+
+The `snapshot_id` groups the outputs of one pipeline execution; it is not a SQL Server transaction snapshot. The gate does not freeze the source database or guarantee that all seven extracts observed the exact same point in time.
+
+Silver then runs in a fixed dependency order:
 
 ```text
-sales_order_header → sales_order_detail → customer
-→ sales_territory → product → sales_person
+sales_order_header → sales_order_detail → customer → sales_territory → product → sales_person
 ```
 
-Silver reads Bronze in chunks, checks schemas, converts data types, runs business cleaners, quarantines conversion errors, checks grain/primary keys, deduplicates each full table, and validates the results before publication. `bronze.person` is required to enrich `sales_person`.
+Bronze has 7 targets, but Silver publishes 6 tables because this is a Sales-focused analytical layer, not a one-to-one copy of Bronze. `bronze.person` is a lookup dependency used to add names to individual customers and salespeople; it does not have its own Silver target. For each of the 6 outputs, Silver reads Bronze in chunks, checks schemas, converts data types, runs business cleaners, quarantines conversion errors, checks grain/primary keys, deduplicates, and validates the staged result before publication. Cleaned data is staged and validated before it is published; it is not inserted directly into the consumer-facing Silver tables.
 
 **Output — 6 clean tables:**
 
@@ -285,61 +288,47 @@ python -m src.app.cli --stage gold --source-snapshot-id <snapshot_id>
 
 ## Configuration and Runtime
 
-All settings are read from `.env` (copy `.env.example` to get started). Key values:
+The full pipeline connects to two databases: a source SQL Server that already contains `AdventureWorks2012`, and a target PostgreSQL warehouse. This repository's Docker Compose file starts PostgreSQL only; it does not install SQL Server or provision the source database. `Settings` loads environment variables and can also read a local `.env` file. Copy `.env.example` to `.env`, then replace the placeholders with values for your machine.
 
-```ini
-# SQL Server — uses Windows Authentication; no username or password required
-SQL_SERVER_HOST=HELIOS\HELIOS
-SQL_SERVER_PORT=1433
-SQL_SERVER_DATABASE=AdventureWorks2012
-SQL_SERVER_AUTH_MODE=windows
+For Windows Authentication, set `SQL_SERVER_HOST` to your reachable SQL Server host or `host\instance`; the Windows account running the pipeline must have access to `AdventureWorks2012`. For SQL Server authentication, set `SQL_SERVER_AUTH_MODE=sql` and provide `SQL_SERVER_USERNAME` and `SQL_SERVER_PASSWORD`.
 
-# PostgreSQL — runs locally through Docker Compose
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-POSTGRES_DATABASE=adventureworks_warehouse
-POSTGRES_USERNAME=postgres
-POSTGRES_PASSWORD=postgres
+Set a unique local `POSTGRES_PASSWORD` in `.env` before starting Compose. The Compose service publishes PostgreSQL on `127.0.0.1` only and refuses to start without that password. `.env` is ignored by Git; never commit it or put production credentials in `.env.example`. These local-development settings are not a production deployment recipe.
 
-# Pipeline settings
-BATCH_SIZE=10000
-RETRY_MAX_ATTEMPTS=3
-```
-
-**Security of `localhost:1433` and `localhost:5432`:**
-
-Both are bound to `localhost`, meaning they **accept connections only from the machine running the pipeline** and are not exposed to external networks. This is a local development environment, not production. For deployment to a real server:
-- Replace `localhost` with an internal address (a private IP, not a public IP)
-- Use environment variables or a secrets manager instead of hardcoding secrets in `.env`
-- Replace the `postgres`/`postgres` password with strong credentials
-- Consider SSL/TLS for PostgreSQL connections
-
-Docker Compose initializes the PostgreSQL schemas `bronze`, `bronze_staging`, `silver`, and `gold`, along with metadata tables, on first startup (through `init-db.sql`).
+Docker Compose initializes the PostgreSQL schemas `bronze`, `bronze_staging`, `silver`, and `gold`, along with metadata tables, when the database volume is first created (through `init-db.sql`).
 
 ---
 
 ## Running the Application
 
-**Step 1 — Start the PostgreSQL warehouse (if it is not already running):**
+**Step 1 — Create and configure your local environment:**
 
 ```powershell
-docker-compose up -d
+Copy-Item .env.example .env
 ```
 
-**Step 2 — Activate the virtual environment:**
+Edit `.env` before continuing. Set `SQL_SERVER_HOST` to your SQL Server instance and choose a non-empty, unique `POSTGRES_PASSWORD`. The source SQL Server and `AdventureWorks2012` database must already be installed and accessible; this repository does not create them.
+
+**Step 2 — Create the Python environment and install dependencies:**
 
 ```powershell
-cd "A:\Workspace\DataEngineer\AdventureWorks Analytics Platform"
+py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
 
-**Step 3 — Run the pipeline:**
+**Step 3 — Start the PostgreSQL warehouse:**
+
+```powershell
+docker compose up -d postgres
+```
+
+**Step 4 — Run the pipeline:**
 
 ```powershell
 python main.py
 ```
 
-These three steps are all that is needed. There is no need to run migration or DDL scripts manually; `PlatformBootstrapJob` creates all schemas and metadata tables the first time the pipeline runs, using `init-db.sql` already loaded by Docker Compose.
+`PlatformBootstrapJob` creates application schemas and metadata tables as needed. Docker loads `init-db.sql` only when it initializes a new PostgreSQL data volume.
 
 **Prerequisites:**
 
@@ -347,7 +336,9 @@ These three steps are all that is needed. There is no need to run migration or D
 - Docker Desktop running (for PostgreSQL)
 - SQL Server with the `AdventureWorks2012` database accessible
 - ODBC Driver 17 for SQL Server installed
-- `.env` created and configured according to `.env.example`
+- `.env` created from `.env.example` and configured for both database connections
+
+If you do not have access to an AdventureWorks2012 SQL Server instance, you cannot run the full ingestion pipeline. You can still run the offline unit tests without either database.
 
 ---
 

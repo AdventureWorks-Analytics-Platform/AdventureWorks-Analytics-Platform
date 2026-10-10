@@ -2,13 +2,19 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from src.shared.ingestion.ingestion_models import ExecutionIdentity, RejectedRecord, TableSpec
+from src.shared.ingestion.ingestion_models import (
+    ExecutionIdentity,
+    RejectedRecord,
+    TableSpec,
+)
 
 
 class BronzeValidator:
     """Validate count parity and Bronze quality checks for sales extraction."""
 
-    def validate(self, source_count: int, target_count: int, source_table: str, bronze_table: str) -> bool:
+    def validate(
+        self, source_count: int, target_count: int, source_table: str, bronze_table: str
+    ) -> bool:
         if source_count == target_count:
             return True
         raise ValueError(
@@ -24,7 +30,9 @@ class BronzeValidator:
     ) -> tuple[pd.DataFrame, tuple[RejectedRecord, ...]]:
         """Separate row-level primary-key failures from schema failures."""
         missing_columns = [
-            column for column in spec.required_columns if column not in dataframe.columns
+            column
+            for column in spec.required_columns
+            if column not in dataframe.columns
         ]
         if missing_columns:
             raise ValueError(
@@ -64,7 +72,9 @@ class BronzeValidator:
     ) -> dict:
         """Validate a complete staging DataFrame before it can be published."""
         missing_columns = [
-            column for column in spec.required_columns if column not in dataframe.columns
+            column
+            for column in spec.required_columns
+            if column not in dataframe.columns
         ]
         required_lineage = [
             "_source_system",
@@ -170,9 +180,19 @@ class BronzeValidator:
                 f"source={source_count}, target={target_count}"
             )
 
-        lineage_columns_ok = all(column in required_lineage for column in ["_source_system", "_source_table", "_load_date", "_record_hash"])
+        lineage_columns_ok = all(
+            column in required_lineage
+            for column in [
+                "_source_system",
+                "_source_table",
+                "_load_date",
+                "_record_hash",
+            ]
+        )
         if not lineage_columns_ok:
-            issues.append(f"Missing lineage columns in {bronze_table}: expected metadata fields")
+            issues.append(
+                f"Missing lineage columns in {bronze_table}: expected metadata fields"
+            )
 
         critical_columns_ok = True
         for column, allowed_nulls in required_critical.items():

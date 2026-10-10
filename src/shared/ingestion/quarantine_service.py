@@ -38,11 +38,18 @@ class PostgresQuarantineService:
                 ON CONFLICT (run_id, load_id, batch_id, record_key, source_hash)
                 DO NOTHING
                 """,
-                (rejected_record.run_id, rejected_record.load_id,
-                 rejected_record.batch_id, rejected_record.source_table,
-                 rejected_record.record_key, rejected_record.source_hash,
-                 rejected_record.reason, rejected_record.rejected_at,
-                 rejected_record.transform_version, rejected_record.error_type),
+                (
+                    rejected_record.run_id,
+                    rejected_record.load_id,
+                    rejected_record.batch_id,
+                    rejected_record.source_table,
+                    rejected_record.record_key,
+                    rejected_record.source_hash,
+                    rejected_record.reason,
+                    rejected_record.rejected_at,
+                    rejected_record.transform_version,
+                    rejected_record.error_type,
+                ),
             )
         return rejected_record
 
