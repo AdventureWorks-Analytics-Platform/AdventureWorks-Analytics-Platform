@@ -1,12 +1,15 @@
 #!/usr/bin/env python
 import psycopg2
 
+from src.core.settings import get_settings
+
+settings = get_settings()
 conn = psycopg2.connect(
-    host='localhost',
-    port=5432,
-    database='adventureworks_warehouse',
-    user='postgres',
-    password='postgres'
+    host=settings.postgres_host,
+    port=settings.postgres_port,
+    database=settings.postgres_database,
+    user=settings.postgres_username,
+    password=settings.postgres_password.get_secret_value(),
 )
 
 cur = conn.cursor()
